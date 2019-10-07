@@ -1,0 +1,33 @@
+[package]
+name        = "janky"
+version     = "0.1.0"
+edition     = "2018"
+
+description = "The Janky project generator"
+authors     = ["Jeremie Pelletier <jeremiep@gmail.com>"]
+
+readme      = "README.md"
+license     = "MIT"
+repository  = "https://github.com/lcodes/janky"
+
+categories  = ["command-line-utilities", "development-tools::build-utils"]
+keywords    = []
+
+publish     = false
+
+[badges]
+# TODO
+
+[dependencies]
+clap       = { version = "2.33", features = ["suggestions", "vec_map"] }
+envy       = { version = "0.4" }
+glob       = { version = "0.3" }
+pathdiff   = { version = "0.1.0" }
+rand       = { version = "0.7.2" }
+semver     = { version = "0.9" }
+serde      = { version = "1.0.101", features = ["derive"] }
+serde_repr = { version = "0.1" }
+toml       = { version = "0.5" }
+uuid       = { git = "https://github.com/uuid-rs/uuid", features = ["v4"] }
+
+# NOTE: uuid uses git because the current latest on crates.io depends on older rand
