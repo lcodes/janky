@@ -11,7 +11,9 @@ impl Generator for CMake {
       PlatformType::MacOS   => false,
       PlatformType::IOS     => false,
       PlatformType::TVOS    => false,
-      PlatformType::Windows => false
+      PlatformType::WatchOS => false,
+      PlatformType::Windows => false,
+      PlatformType::HTML5   => true
     }
   }
 

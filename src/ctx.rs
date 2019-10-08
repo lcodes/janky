@@ -45,6 +45,7 @@ pub struct Context<'a> {
   pub input_dir: PathBuf,
   pub build_dir: PathBuf,
 
+  pub env:      &'a Env,
   pub args:     &'a ArgMatches<'a>,
   pub project:  &'a Project<'a>,
   pub files:    &'a AllFiles,
@@ -68,20 +69,24 @@ impl<'a> Context<'a> {
   }
 }
 
-pub struct FileInfo(pub PathBuf);
+#[derive(Debug)]
+pub struct FileInfo {
+  pub path: PathBuf,
+  pub meta: std::fs::Metadata
+}
 
 impl FileInfo {
   pub fn to_str(&self) -> &'_ str {
-    self.0.to_str().unwrap()
+    self.path.to_str().unwrap()
   }
   pub fn path(&self) -> &'_ PathBuf {
-    &self.0
+    &self.path
   }
   pub fn name(&self) -> &'_ str {
-    self.0.file_name().unwrap().to_str().unwrap()
+    self.path.file_name().unwrap().to_str().unwrap()
   }
   pub fn extension(&self) -> &'_ str {
-    self.0.extension().unwrap().to_str().unwrap()
+    self.path.extension().unwrap().to_str().unwrap()
   }
 }
 
@@ -90,7 +95,9 @@ impl FileInfo {
 pub struct Env {
   pub cflags:   String,
   pub cxxflags: String,
-  pub ldflags:  String
+  pub ldflags:  String,
+
+  pub jank_xcode_team: Option<String>
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,7 +277,9 @@ pub enum PlatformType {
   MacOS   =  2,
   IOS     =  3,
   TVOS    =  4,
-  Android =  5
+  WatchOS =  5,
+  Android =  6,
+  HTML5   =  7
 }
 
 impl PlatformType {
@@ -282,7 +291,9 @@ impl PlatformType {
       Self::MacOS   => "macOS",
       Self::IOS     => "iOS",
       Self::TVOS    => "tvOS",
-      Self::Android => "Android"
+      Self::WatchOS => "watchOS",
+      Self::Android => "Android",
+      Self::HTML5   => "HTML5"
     }
   }
 }

@@ -80,13 +80,29 @@ use std::path::PathBuf;
 
 use crate::ctx::{Context, Generator, PlatformType, RunResult, Target, TargetType};
 
-const PLATFORMS: [PlatformType; 3] = [
+const PLATFORMS: [PlatformType; 4] = [
   PlatformType::MacOS,
   PlatformType::IOS,
-  PlatformType::TVOS
+  PlatformType::TVOS,
+  PlatformType::WatchOS
 ];
 
 pub struct XCode;
+
+#[derive(Debug)]
+struct StrError(pub String);
+
+impl std::fmt::Display for StrError {
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    write!(f, "{}", self.0)
+  }
+}
+
+impl std::error::Error for StrError {
+  fn description(&self) -> &str {
+    self.0.as_str()
+  }
+}
 
 impl Generator for XCode {
   fn supports_platform(&self, p: PlatformType) -> bool {
@@ -96,10 +112,38 @@ impl Generator for XCode {
 
   // TODO check if any target matches before calling
   fn run(&self, ctx: &Context) -> RunResult {
+    let team_output;
+    let team = match &ctx.env.jank_xcode_team {
+      None => None,
+      Some(name) => {
+        use std::str::from_utf8;
+
+        team_output = std::process::Command::new("sh")
+          .args(&["-c", format!(concat!("certtool y | ",
+                                        "grep \"Org \\+: {}\" -B 1 | ",
+                                        "head -n 1 | ",
+                                        "awk '{{print $3}}'"),
+                                name).as_str()])
+          .output()?;
+
+        if !team_output.status.success() {
+          return Err(Box::new(StrError(["Failed to get the provisioning profile for '",
+                                        name, "': ", from_utf8(&team_output.stderr)?].join(""))));
+        }
+
+        let team = from_utf8(&team_output.stdout)?;
+        if team.is_empty() {
+          return Err(Box::new(StrError("Failed to get the provisioning profile".to_string())));
+        }
+
+        Some(team)
+      }
+    };
+
     let mut proj_dir = ctx.build_dir.join(&ctx.project.name);
     proj_dir.set_extension("xcodeproj");
     create_dir_all(&proj_dir)?;
-    write_pbx(ctx, &proj_dir)?;
+    write_pbx(ctx, &proj_dir, team)?;
     Ok(())
   }
 }
@@ -298,7 +342,7 @@ fn get_file_type(ext: &'_ str) -> (Phase, &'static str) {
   }
 }
 
-fn write_pbx(ctx: &Context, proj_dir: &PathBuf) -> IO {
+fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
   // Open the file for writing right away to bail out early on failure.
   let mut f = File::create(proj_dir.join("project.pbxproj"))?;
 
@@ -316,7 +360,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf) -> IO {
   let mut targets       = Vec::with_capacity(ctx.project.targets.len());
 
   for _ in 0..targets.capacity() {
-    targets.push([None, None, None]);
+    targets.push([None, None, None, None]);
   }
 
   // Collect information about files from every target.
@@ -330,8 +374,9 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf) -> IO {
     };
 
     ctx.files.iter().flatten()
+      .filter(|info| info.meta.is_file())
       .fold(HashMap::<&PathBuf, FileStats>::new(), |mut m, info| {
-        m.entry(&info.0)
+        m.entry(&info.path)
           .and_modify(|e| {
             if e.num_targets == 1 {
               group.push(&e.id, info.name());
@@ -375,6 +420,9 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf) -> IO {
     build_cfg(&mut cfgs, &id, prof, |s| {
       write!(s, concat!("        ALWAYS_SEARCH_USER_PATHS = NO;\n",
                         "        PRODUCT_NAME = \"$(TARGET_NAME)\";\n")).unwrap();
+
+      write!(s, concat!("        CLANG_CXX_LANGUAGE_STANDARD = \"c++17\";\n",
+                        "        GCC_C_LANGUAGE_STANDARD = c11;\n")).unwrap();
     });
     project_cfgs.push(&id, prof);
     // profiles.clear();
@@ -403,7 +451,8 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf) -> IO {
       };
 
       for file_info in target_files {
-        let file = &file_stats[&file_info.0];
+        if file_info.meta.is_dir() {continue}
+        let file = &file_stats[&file_info.path];
         if file.num_targets == 1 {
           group.push(&file.id, file_info.name()); // TODO map folders to sub-groups
         }
@@ -419,7 +468,10 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf) -> IO {
         let id = random_id();
         build_cfg(&mut cfgs, &id, prof, |s| {
           // TODO PRODUCT_NAME ?
-          // TODO DEVELOPMENT_TEAM
+
+          if let Some(id) = team {
+            write!(s, "        DEVELOPMENT_TEAM = {};\n", id).unwrap();
+          }
 
           if target.target_type == TargetType::Application {
             // TODO get app icon resource
@@ -454,6 +506,8 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf) -> IO {
           // VERSIONING_SYSTEM = "apple-generic";
           // VERSION_INFO_PREFIX = "";
 
+          write!(s, "        PRODUCT_BUNDLE_IDENTIFIER = com.lambdacoder.Jank;\n").unwrap(); // TODO
+
           match platform {
             PlatformType::MacOS => {
               // TODO COMBINE_HIDPI_IMAGES = YES;
@@ -469,6 +523,11 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf) -> IO {
               write!(s, "        IPHONEOS_DEPLOYMENT_TARGET = 13.0;\n").unwrap();
               write!(s, "        SDKROOT = appletvos;\n").unwrap();
               write!(s, "        TARGETED_DEVICE_FAMILY = 3;\n").unwrap();
+            },
+            PlatformType::WatchOS => {
+              write!(s, "        IPHONEOS_DEPLOYMENT_TARGET = 13.0;\n").unwrap();
+              write!(s, "        SDKROOT = watchos;\n").unwrap();
+              write!(s, "        TARGETED_DEVICE_FAMILY = 4;\n").unwrap();
             },
             _ => unreachable!(),
           }
@@ -532,8 +591,9 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf) -> IO {
 
       // Generate the build files for this target.
       for file_info in target_files {
+        if file_info.meta.is_dir() {continue} // TODO
         let name = file_info.name();
-        let file = &file_stats[&file_info.0];
+        let file = &file_stats[&file_info.path];
 
         match file.phase {
           Phase::None     => {},

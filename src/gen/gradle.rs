@@ -11,7 +11,9 @@ impl Generator for Gradle {
       PlatformType::Linux   => false,
       PlatformType::MacOS   => false,
       PlatformType::TVOS    => false,
-      PlatformType::Windows => false
+      PlatformType::WatchOS => false,
+      PlatformType::Windows => false,
+      PlatformType::HTML5   => false
     }
   }
 

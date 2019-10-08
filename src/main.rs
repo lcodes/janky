@@ -23,7 +23,7 @@ fn main() {
   let generators = gen::init();
 
   // Parse the environment variables.
-  let _env: ctx::Env = envy::from_env() // TODO use it
+  let env: ctx::Env = envy::from_env()
     .check(|| "Failed to parse environment variables");
 
   // Parse the command line.
@@ -91,7 +91,7 @@ fn main() {
   }
 
   #[cfg(debug_assertions)]
-  println!("{:#?}", project);
+  println!("{:#?}\n{:#?}", project, files);
 
   // Execute the requested command.
   let ctx = ctx::Context {
@@ -100,6 +100,7 @@ fn main() {
     generators,
     input_dir,
     build_dir,
+    env:      &env,
     args:     &args,
     project:  &project,
     files:    &files,
@@ -145,7 +146,9 @@ fn find_files(dir: &PathBuf, target: &ctx::Target) -> ctx::DynResult<ctx::Target
   let mut files = Vec::new();
   for pattern in &target.files {
     for m in glob::glob(dir.join(pattern).to_str().unwrap())? {
-      files.push(ctx::FileInfo(PathBuf::from(m?.strip_prefix(dir)?)));
+      let path = PathBuf::from(m?.strip_prefix(dir)?);
+      let meta = std::fs::metadata(dir.join(&path))?;
+      files.push(ctx::FileInfo { path, meta });
     }
   }
   Ok(files)

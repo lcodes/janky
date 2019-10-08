@@ -16,7 +16,9 @@ impl Generator for VisualStudio {
       PlatformType::Linux   => false,
       PlatformType::IOS     => false,
       PlatformType::MacOS   => false,
-      PlatformType::TVOS    => false
+      PlatformType::TVOS    => false,
+      PlatformType::WatchOS => false,
+      PlatformType::HTML5   => false
     }
   }
 

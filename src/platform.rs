@@ -1,8 +1,10 @@
 mod android;
 mod ios;
+mod html5;
 mod linux;
 mod macos;
 mod tvos;
+mod watchos;
 mod windows;
 
 use crate::ctx::Platforms;
@@ -14,7 +16,9 @@ pub fn init() -> Platforms {
     Box::new(macos::MacOS),
     Box::new(ios::IOS),
     Box::new(tvos::TVOS),
-    Box::new(android::Android)
+    Box::new(watchos::WatchOS),
+    Box::new(android::Android),
+    Box::new(html5::HTML5)
   );
 
   for (i, p) in platforms.iter().enumerate() {
