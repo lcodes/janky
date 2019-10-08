@@ -342,6 +342,36 @@ fn get_file_type(ext: &'_ str) -> (Phase, &'static str) {
   }
 }
 
+fn write_info_plist(path: &PathBuf) -> IO {
+  let mut f = File::create(path)?;
+
+  write!(f, concat!(r#"<?xml version="1.0" encoding="UTF-8"?>"#, "\n",
+                    r#"<!DOCTYPE plist PUBLIC "-//APPLE//DTD PLIST 1.0//EN" "#,
+                    r#""http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#, "\n",
+                    r#"<plist version="1.0">"#, "\n",
+                    "<dict>\n",
+                    "  <key>CFBundleDevelopmentRegion</key>\n",
+                    "  <string>${{DEVELOPMENT_LANGUAGE}}</string>\n",
+                    "  <key>CFBundleExecutable</key>\n",
+                    "  <string>${{EXECUTABLE_NAME}}</string>\n",
+                    "  <key>CFBundleIdentifier</key>\n",
+                    "  <string>${{PRODUCT_BUNDLE_IDENTIFIER}}</string>\n",
+                    "  <key>CFBundleInfoDictionaryVersion</key>\n",
+                    "  <string>6.0</string>\n",
+                    "  <key>CFBundleName</key>\n",
+                    "  <string>${{PRODUCT_NAME}}</string>\n",
+                    "  <key>CFBundlePackageType</key>\n",
+                    "  <string>${{PRODUCT_BUNDLE_PACKAGE_TYPE}}</string>\n",
+                    "  <key>CFBundleShortVersionString</key>\n",
+                    "  <string>1.0</string>\n",
+                    "  <key>CFBundleVersion</key>\n",
+                    "  <string>1</string>\n",
+                    "</dict>\n",
+                    "</plist>\n"))?;
+
+  Ok(())
+}
+
 fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
   // Open the file for writing right away to bail out early on failure.
   let mut f = File::create(proj_dir.join("project.pbxproj"))?;
@@ -428,6 +458,8 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
     // profiles.clear();
   }
 
+  let gen_root = pathdiff::diff_paths(&ctx.build_dir, &ctx.input_dir).unwrap();
+
   // Gather data for all the supported target/platform pairs.
   for (target_index, (target_name, target)) in ctx.project.targets.iter().enumerate() {
     let platforms: Vec<(usize, PlatformType)> = PLATFORMS.iter().cloned().enumerate()
@@ -463,6 +495,13 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
       let mut cfg_list     = CfgList::new();
       let mut build_phases = String::new();
 
+      let gen_dir = PathBuf::from([target_name, "_", platform.to_str()].join(""));
+      let plist   = gen_dir.join("Info.plist");
+      create_dir_all(gen_dir)?;
+      write_info_plist(&ctx.build_dir.join(&plist))?;
+
+      let plist_relative = gen_root.join(plist);
+
       // Generate the build configurations for this target.
       for prof in &profile_names {
         let id = random_id();
@@ -475,10 +514,10 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
 
           if target.target_type == TargetType::Application {
             // TODO get app icon resource
-            // TODO get plist for platform
             write!(s, concat!("        ASSETCATALOG_COMPILER_APPICON_NAME = \"\";\n",
                               "        CODE_SIGN_STYLE = Automatic;\n",
-                              "        INFOPLIST_FILE = \"\";\n")).unwrap();
+                              "        INFOPLIST_FILE = {:?};\n"),
+                   plist_relative).unwrap();
           }
 
           // TODO libraries
