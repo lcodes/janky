@@ -13,7 +13,7 @@ impl Generator for Make {
       PlatformType::TVOS    => false,
       PlatformType::WatchOS => false,
       PlatformType::Windows => false,
-      PlatformType::HTML5   => false
+      PlatformType::HTML5   => true
     }
   }
 

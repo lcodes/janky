@@ -10,6 +10,9 @@ impl Command for Gen {
   }
 
   fn run(&self, ctx: &Context) -> RunResult {
-    ctx.generators.get("xcode").unwrap().run(ctx)
+    for (_, g) in &ctx.generators {
+      g.run(ctx)?;
+    }
+    Ok(())
   }
 }

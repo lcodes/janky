@@ -788,6 +788,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
 
       // Generate application assets.
       if target.target_type == TargetType::Application {
+        // TODO don't generate info.plist if it exists in assets
         let gen_dir = PathBuf::from([target_name, "_", platform.to_str()].join(""));
         let plist   = gen_dir.join("Info.plist");
         create_dir_all(&gen_dir)?;
@@ -801,7 +802,6 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
 
         write!(&mut build_settings, "        INFOPLIST_FILE = {:?};\n", plist_ref).unwrap();
 
-        // TODO group by platform in data?
         if let Some(dir) = target.assets {
           let platform_pattern = match platform {
             PlatformType::MacOS   => "/macos/",
