@@ -548,6 +548,10 @@ fn fold_asset_tvos<'a, 'b>(asset: &'b mut AssetContent<'a>, p: &ParsedAsset<'a>)
         .stack(p.layer)
         .image("tv", p);
     },
+    "Top Shelf Image" => {
+      asset.brand("1920x720", "top-shelf-image", "Top Shelf Image.imageset")
+        .image("tv", p);
+    },
     "Top Shelf Image Wide" => {
       asset.brand("2320x720", "top-shelf-image-wide", "Top Shelf Image Wide.imageset")
         .image("tv", p);
@@ -624,15 +628,15 @@ fn write_contents_json(root: &Path, path: &Path, content: &AssetContent) -> IO {
     f.flush()?;
   }
 
+  let src = pathdiff::diff_paths(&root, &path).unwrap();
+
   for image in &content.images {
     let target = path.join(image.path.file_name().unwrap());
     if target.symlink_metadata().is_ok() {
       remove_file(&target)?;
     }
 
-    let mut src = pathdiff::diff_paths(&root, &target).unwrap();
-    src.push(image.path);
-    std::os::unix::fs::symlink(src, &target)?;
+    std::os::unix::fs::symlink(src.join(image.path), &target)?;
   }
 
   for child in &content.children {
@@ -733,9 +737,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   // let mut profiles = Vec::new();
 
   // Project build configurations.
-  let profile_names = ctx.profile_names();
-
-  for prof in &profile_names {
+  for prof in &ctx.profiles {
     // if let Some(p) = ctx.profiles.get(prof) {
     //   profiles.push(&p[0].settings);
     // }
@@ -757,17 +759,13 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
     // profiles.clear();
   }
 
-  let build_root = pathdiff::diff_paths(&ctx.build_dir, &ctx.input_dir).unwrap();
-  let input_root = pathdiff::diff_paths(&ctx.input_dir, &ctx.build_dir).unwrap();
-
   // Gather data for all the supported target/platform pairs.
   for (target_index, (target_name, target)) in ctx.project.targets.iter().enumerate() {
-    let platforms: Vec<(usize, PlatformType)> = PLATFORMS.iter().cloned().enumerate()
-      .filter(|(_, p)| {
+    let platforms = PLATFORMS.iter().cloned().enumerate()
+      .filter(|&(_, p)| {
         // TODO also filter away unsupported architectures here?
-        ctx.project.filter.matches_platform(*p) && target.filter.matches_platform(*p)
-      })
-      .collect();
+        ctx.project.filter.matches_platform(p) && target.filter.matches_platform(p)
+      }).collect::<Vec<(usize, PlatformType)>>();
 
     let has_multiple_platforms = platforms.len() > 1;
     let target_files = &ctx.sources[target_index];
@@ -817,7 +815,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
         write_info_plist(&ctx.build_dir.join(&plist))?;
 
         let plist_name   = pretty_name(has_multiple_platforms, "Info.plist", platform);
-        let plist_ref    = build_root.join(plist);
+        let plist_ref    = ctx.build_rel.join(plist);
         let plist_ref_id = random_id();
         write_file_ref(&mut refs, &plist_ref_id, &plist_name, Some(&plist_ref), "text.plist.xml");
         group.push(&plist_ref_id, &plist_name);
@@ -849,7 +847,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
           write_contents_json(&ctx.input_dir, &ctx.build_dir.join(&assets_path), &assets)?;
 
           let assets_name   = pretty_name(has_multiple_platforms, assets.name, platform);
-          let assets_ref    = build_root.join(assets_path);
+          let assets_ref    = ctx.build_rel.join(assets_path);
           let assets_ref_id = random_id();
           build_file(&mut resources, &mut files, &assets_name, &assets_ref_id, "Resources");
           write_file_ref(&mut refs, &assets_ref_id, &assets_name, Some(&assets_ref), "folder.assetcatalog");
@@ -867,7 +865,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
       }
 
       // Generate the build configurations for this target.
-      for prof in &profile_names {
+      for prof in &ctx.profiles {
         let id = random_id();
         build_cfg(&mut cfgs, &id, prof, |s| {
           if let Some(id) = team {
@@ -1154,7 +1152,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
                     "      targets = (\n"),
          main_group_id    = main_group.id,
          product_group_id = main_group.groups.last().unwrap().id,
-         project_dir_path = input_root)?;
+         project_dir_path = ctx.input_rel)?;
 
   for data in targets.iter().flatten().flatten() {
       write!(f, "        {} /* {} */,\n", data.target_id, &data.product_name)?;

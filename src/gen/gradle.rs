@@ -10,13 +10,7 @@ impl Generator for Gradle {
     match p {
       PlatformType::Any     => unreachable!(),
       PlatformType::Android => true,
-      PlatformType::IOS     => false,
-      PlatformType::Linux   => false,
-      PlatformType::MacOS   => false,
-      PlatformType::TVOS    => false,
-      PlatformType::WatchOS => false,
-      PlatformType::Windows => false,
-      PlatformType::HTML5   => false
+      _                     => false
     }
   }
 
@@ -25,11 +19,12 @@ impl Generator for Gradle {
       return Ok(());
     }
 
-    let targets: Vec<Build> = ctx.project.targets.iter()
-      .filter(|(_, target)| target.filter.matches_platform(PlatformType::Android) &&
-          target.target_type == TargetType::Application)
-      .map(|(name, target)| Build { name, target, path: [name, "_Android"].join("") })
-      .collect();
+    let targets = ctx.project.targets.iter().filter_map(|(name, target)| {
+      match target.filter.matches_platform(PlatformType::Android) &&
+        target.target_type == TargetType::Application {
+          false => None,
+          true  => Some(Build { name, target, path: [name, "_Android"].join("") })
+        }}).collect::<Vec<Build>>();
 
     if targets.is_empty() {
       return Ok(());
@@ -50,9 +45,9 @@ impl Generator for Gradle {
 type IO = std::io::Result<()>;
 
 struct Build<'a> {
+  path:   String,
   name:   &'a str,
-  target: &'a Target<'a>,
-  path:   String
+  target: &'a Target<'a>
 }
 
 fn write_target_build(ctx: &Context, build: &Build) -> IO {
@@ -70,8 +65,14 @@ fn write_target_build(ctx: &Context, build: &Build) -> IO {
                     "    minSdkVersion {min_sdk_version}\n",
                     "    targetSdkVersion {target_sdk_version}\n",
                     "    versionCode {version_code}\n",
-                    "    versionName '{version_name}'\n",
-                    "    ndk.abiFilters 'arm64-v8a'\n", // TODO dont hardcode filters
+                    "    versionName '{version_name}'\n\n",
+                    "    ndk.abiFilters 'arm64-v8a'\n\n", // TODO dont hardcode filters
+                    "    sourceSets {{\n",
+                    "      main {{\n",
+                    "        manifest.srcFile 'AndroidManifest.xml'\n",
+                    "        res.srcDirs = ['res']\n", // TODO place assets there
+                    "      }}\n",
+                    "    }}\n",
                     "  }}\n\n",
                     "  externalNativeBuild {{\n",
                     "    cmake {{\n",
@@ -90,11 +91,10 @@ fn write_target_build(ctx: &Context, build: &Build) -> IO {
          target_sdk_version  = 29,
          cmake_version       = "3.10.2")?;
 
-  let profile_names = ctx.profile_names();
-  for prof in &profile_names {
+  for &prof in &ctx.profiles {
     write!(f, "    {} {{\n", prof.to_lowercase())?;
 
-    match *prof { // TODO dont hardcode this
+    match prof { // TODO dont hardcode this
       "Debug" => {
         f.write(concat!("      packagingOptions {\n",
                         "        doNotStrip '**.so'\n",
@@ -102,7 +102,7 @@ fn write_target_build(ctx: &Context, build: &Build) -> IO {
       },
       "Release" => {
         f.write(concat!("      minifyEnabled true\n",
-                        "      proguardFiles getDefaultProguardFile('proguard-android.txt),",
+                        "      proguardFiles getDefaultProguardFile('proguard-android.txt'),",
                         " 'proguard-rules.pro'\n").as_bytes())?;
       },
       _ => {}
@@ -184,7 +184,7 @@ fn write_target_manifest(ctx: &Context, build: &Build, path: &std::path::Path) -
   let mut f = File::create(path.join("AndroidManifest.xml"))?;
   write!(f, concat!("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
                     "<manifest\n",
-                    "    xmlns:android=\"http://scnemas.android.com/apk/res/android\"\n",
+                    "    xmlns:android=\"http://schemas.android.com/apk/res/android\"\n",
                     "    package=\"{application_id}\"\n",
                     "    android:versionCode=\"{version_code}\"\n",
                     "    android:versionName=\"{version_name}\">\n",

@@ -44,6 +44,8 @@ pub struct Context<'a> {
 
   pub input_dir: PathBuf,
   pub build_dir: PathBuf,
+  pub build_rel: PathBuf,
+  pub input_rel: PathBuf,
 
   pub env:       &'a Env,
   pub args:      &'a ArgMatches<'a>,
@@ -52,23 +54,8 @@ pub struct Context<'a> {
   pub resources: &'a AllFiles,
   pub assets:    &'a AllFiles,
 
-  pub profiles: Profiles<'a>
-}
-
-impl<'a> Context<'a> {
-  pub fn profile_names(&self) -> Vec<&'a str> {
-    let mut v: Vec<&'a str> = self.profiles.keys().cloned().collect();
-
-    v.extend(self.project.profiles.keys().cloned());
-
-    for t in self.project.targets.values() {
-      v.extend(t.profiles.keys().cloned());
-    }
-
-    v.sort_unstable();
-    v.dedup();
-    v
-  }
+  pub profiles: Vec<&'a str>,
+  pub defaults: Profiles<'a>
 }
 
 #[derive(Debug)]

@@ -13,21 +13,16 @@ impl Generator for VisualStudio {
       PlatformType::Any     => unreachable!(),
       PlatformType::Windows => true,
       PlatformType::Android => true,
-      PlatformType::Linux   => false,
-      PlatformType::IOS     => false,
-      PlatformType::MacOS   => false,
-      PlatformType::TVOS    => false,
-      PlatformType::WatchOS => false,
-      PlatformType::HTML5   => false
+      _                     => false
     }
   }
 
   fn run(&self, ctx: &Context) -> RunResult {
     let tools = Tools::new(Version::VS2019); // TODO configure
-    let projs: Vec<Proj> = ctx.project.targets
+    let projs = ctx.project.targets
       .iter()
       .map(|kv| Proj::new(kv, &ctx.build_dir))
-      .collect();
+      .collect::<Vec<Proj>>();
 
     for (i, proj) in projs.iter().enumerate() {
       write_proj(ctx, &tools, i, proj)?;

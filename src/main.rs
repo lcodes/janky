@@ -101,19 +101,23 @@ fn main() {
   // println!("{:#?}", project);
 
   // Execute the requested command.
+  let defaults = ctx::Settings::defaults();
   let ctx = ctx::Context {
-    commands,
-    platforms,
-    generators,
-    input_dir,
-    build_dir,
     env:       &env,
     args:      &args,
     project:   &project,
     sources:   &sources,
     resources: &resources,
     assets:    &assets,
-    profiles:  ctx::Settings::defaults()
+    profiles:  profile_names(&defaults, &project),
+    build_rel: pathdiff::diff_paths(&build_dir, &input_dir).unwrap(),
+    input_rel: pathdiff::diff_paths(&input_dir, &build_dir).unwrap(),
+    input_dir,
+    build_dir,
+    defaults,
+    commands,
+    platforms,
+    generators
   };
 
   let cmd_name = ctx.args.subcommand_name().unwrap_or("gen");
@@ -149,6 +153,20 @@ fn is_supported(min_version: &str) -> ctx::DynResult<()> {
     }
   }
   Ok(())
+}
+
+pub fn profile_names<'a>(profiles: &ctx::Profiles<'a>, project: &ctx::Project<'a>) -> Vec<&'a str> {
+  let mut v = profiles.keys().cloned().collect::<Vec<&'a str>>();
+
+  v.extend(project.profiles.keys().cloned());
+
+  for t in project.targets.values() {
+    v.extend(t.profiles.keys().cloned());
+  }
+
+  v.sort_unstable();
+  v.dedup();
+  v
 }
 
 fn find_all_files<'a, F>(input_dir: &PathBuf,
