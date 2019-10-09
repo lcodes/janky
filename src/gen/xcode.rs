@@ -75,7 +75,7 @@ use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
-use std::fs::{File, create_dir_all};
+use std::fs::{File, create_dir_all, remove_file};
 use std::io::Write as IOWrite;
 use std::path::PathBuf;
 use std::str::from_utf8;
@@ -417,35 +417,38 @@ impl AssetInfo {
 }
 
 #[derive(Serialize)]
-struct Asset<'a> {
+struct Asset {
   pub size:     &'static str,
   pub idiom:    &'static str,
-  pub filename: String,
-  pub role:     &'a str
+  pub filename: &'static str,
+  pub role:     &'static str
 }
 
 #[derive(Serialize)]
 struct AssetLayer {
-  pub filename: String
+  pub filename: &'static str
 }
 
 #[derive(Serialize)]
 struct AssetImage<'a> {
   pub idiom:    &'static str,
   pub filename: String,
-  pub scale:    &'a str
+  pub scale:    &'static str,
+
+  #[serde(skip)]
+  pub path: &'a PathBuf
 }
 
 #[derive(Serialize)]
 struct AssetContent<'a> {
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub assets: Option<Vec<Asset<'a>>>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub assets: Vec<Asset>,
 
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub layers: Option<Vec<AssetLayer>>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub layers: Vec<AssetLayer>,
 
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub images: Option<Vec<AssetImage<'a>>>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub images: Vec<AssetImage<'a>>,
 
   pub info: AssetInfo,
 
@@ -462,9 +465,9 @@ struct AssetContent<'a> {
 impl Default for AssetContent<'_> {
   fn default() -> Self {
     AssetContent {
-      assets:   None,
-      layers:   None,
-      images:   None,
+      assets:   Vec::new(),
+      layers:   Vec::new(),
+      images:   Vec::new(),
       children: Vec::new(),
       info:     AssetInfo::new(),
       name:     "",
@@ -473,48 +476,71 @@ impl Default for AssetContent<'_> {
   }
 }
 
-impl AssetContent<'_> {
-  fn find_child(&mut self) -> &mut Self {
-    &mut self.children[0]
+impl<'a> AssetContent<'a> {
+  fn child(&mut self, name: &'a str) -> &mut Self {
+    match self.children.iter().position(|x| x.name == name) {
+      Some(i) => &mut self.children[i],
+      None    => {
+        self.children.push(AssetContent { name, ..AssetContent::default() });
+        self.children.last_mut().unwrap()
+      }
+    }
+  }
+
+  fn brand(&mut self, size: &'static str, role: &'static str, filename: &'static str) -> &mut Self {
+    let mut brand = self.child("App Icon & Top Shelf Image.brandassets");
+    if !brand.assets.iter().any(|x| x.filename == filename) {
+      brand.assets.push(Asset { size, filename, role, idiom: "tv" });
+    }
+    brand.child(filename)
+  }
+
+  fn stack(&mut self, index: u8) -> &mut Self {
+    let filename = match index {
+      1 => "1.imagestacklayer",
+      2 => "2.imagestacklayer",
+      3 => "3.imagestacklayer",
+      4 => "4.imagestacklayer",
+      5 => "5.imagestacklayer",
+      _ => unreachable!() // TODO better handling
+    };
+
+    if !self.layers.iter().any(|x| x.filename == filename) {
+      self.layers.push(AssetLayer { filename });
+    }
+
+    self.child(filename).child("Content.imageset")
+  }
+
+  fn image(&mut self, idiom: &'static str, p: &ParsedAsset<'a>) {
+    self.images.push(AssetImage {
+      path:     p.path,
+      idiom:    "tv",
+      filename: p.path.file_name().unwrap().to_str().unwrap().to_string(),
+      scale:    match p.size {
+        1 => "1x",
+        2 => "2x",
+        _ => unreachable!() // TODO better handling
+      }
+    });
   }
 }
 
-fn fold_asset_tvos<'a>(asset: &mut AssetContent<'a>, p: &ParsedAsset<'a>) {
-  println!("{:?}", p);
-
+fn fold_asset_tvos<'a, 'b>(asset: &'b mut AssetContent<'a>, p: &ParsedAsset<'a>) where 'a: 'b {
   match p.name {
-    "App Icon" |
+    "App Icon" => {
+      asset.brand("400x240", "primary-app-icon", "App Icon.imagestack")
+        .stack(p.layer)
+        .image("tv", p);
+    }
     "App Icon - App Store" => {
-      // asset.find_child(tvos_brand_assets, || {
-
-      // }).find_child(p.name, || {
-
-      // }).find_child(layer, || {
-
-      // }).find_child("Content.imageset", || {
-
-      // }).images.push();
+      asset.brand("1280x768", "primary-app-icon", "App Icon - App Store.imagestack")
+        .stack(p.layer)
+        .image("tv", p);
     },
     "Top Shelf Image Wide" => {
-      match asset.children.iter_mut().find(|x| {
-        x.name == "Top Shelf Image Wide.imageset"
-      }) {
-        None => {
-          asset.children.push(AssetContent {
-            name:   "Top Shelf Image Wide.imageset",
-            images: Some(Vec::new()),
-            ..AssetContent::default()
-          });
-          asset.children.last_mut().unwrap()
-        },
-        Some(x) => {
-          x
-        }
-      }.images.as_mut().unwrap().push(AssetImage {
-        idiom: "",
-        filename: String::new(),
-        scale: ""
-      });
+      asset.brand("2320x720", "top-shelf-image-wide", "Top Shelf Image Wide.imageset")
+        .image("tv", p);
     },
     "Launch Image" => {
       // ???
@@ -523,7 +549,13 @@ fn fold_asset_tvos<'a>(asset: &mut AssetContent<'a>, p: &ParsedAsset<'a>) {
   }
 }
 
-// TVOS Assets.xcassets
+// macOS Assets.xcassets
+// - ???.iconset
+
+// iOS & watchOS Assets.xcassets
+// - ???.appiconset
+
+// tvOS Assets.xcassets (TODO generate HEIF files?)
 // - App Icon & Top Shelf Image.brandassets [assets]
 //   - Top Shelf Image Wide.imageset [images]
 //   - App Icon - App Store.imagestack [layers]
@@ -572,12 +604,21 @@ fn parse_asset<'a>(path: &'a PathBuf, s: &'a str) -> Option<ParsedAsset<'a>> {
   Some(ParsedAsset { path, name, layer, size })
 }
 
-fn write_contents_json(path: &PathBuf, content: &AssetContent) -> IO {
+fn write_contents_json(root: &PathBuf, path: &PathBuf, content: &AssetContent) -> IO {
   create_dir_all(&path)?;
   serde_json::to_writer_pretty(File::create(path.join("Contents.json"))?, content)?;
 
+  for image in &content.images {
+    let target = path.join(image.path.file_name().unwrap());
+    if target.symlink_metadata().is_ok() {
+      remove_file(&target)?;
+    }
+
+    std::os::unix::fs::symlink(pathdiff::diff_paths(&root, &target).unwrap().join(image.path), &target)?;
+  }
+
   for child in &content.children {
-    write_contents_json(&path.join(child.name), &child)?;
+    write_contents_json(root, &path.join(child.name), &child)?;
   }
 
   Ok(())
@@ -695,7 +736,8 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
     // profiles.clear();
   }
 
-  let gen_root = pathdiff::diff_paths(&ctx.build_dir, &ctx.input_dir).unwrap();
+  let build_root = pathdiff::diff_paths(&ctx.build_dir, &ctx.input_dir).unwrap();
+  let input_root = pathdiff::diff_paths(&ctx.input_dir, &ctx.build_dir).unwrap();
 
   // Gather data for all the supported target/platform pairs.
   for (target_index, (target_name, target)) in ctx.project.targets.iter().enumerate() {
@@ -752,7 +794,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
         write_info_plist(&ctx.build_dir.join(&plist))?;
 
         let plist_name   = pretty_name(has_multiple_platforms, "Info.plist", platform);
-        let plist_ref    = gen_root.join(plist);
+        let plist_ref    = build_root.join(plist);
         let plist_ref_id = random_id();
         write_file_ref(&mut refs, &plist_ref_id, &plist_name, Some(&plist_ref), "text.plist.xml");
         group.push(&plist_ref_id, &plist_name);
@@ -770,22 +812,22 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
           };
           let assets_pattern = [dir, platform_pattern].join("");
           let assets = ctx.assets[target_index].iter()
-            .filter(|info| info.meta.is_file() && info.to_str().starts_with(&assets_pattern))
-            .map   (|info| parse_asset(&info.path, &info.to_str()[assets_pattern.len()..]))
-            .flatten()
-            .fold(AssetContent {
-              name: "Assets.xcassets",
-              ..AssetContent::default()
-            }, |mut assets, parsed| {
-              fold_asset_tvos(&mut assets, &parsed); // TODO generic platform
-              assets
-            });
+              .filter(|info| info.meta.is_file() && info.to_str().starts_with(&assets_pattern))
+              .map   (|info| parse_asset(&info.path, &info.to_str()[assets_pattern.len()..]))
+              .flatten()
+              .fold(AssetContent {
+                name: "Assets.xcassets",
+                ..AssetContent::default()
+              }, |mut assets, parsed| {
+                fold_asset_tvos(&mut assets, &parsed); // TODO generic platform
+                assets
+              });
 
           let assets_path = gen_dir.join(assets.name);
-          write_contents_json(&ctx.build_dir.join(&assets_path), &assets)?;
+          write_contents_json(&ctx.input_dir, &ctx.build_dir.join(&assets_path), &assets)?;
 
           let assets_name   = pretty_name(has_multiple_platforms, assets.name, platform);
-          let assets_ref    = gen_root.join(assets_path);
+          let assets_ref    = build_root.join(assets_path);
           let assets_ref_id = random_id();
           build_file(&mut resources, &mut files, &assets_name, &assets_ref_id, "Resources");
           write_file_ref(&mut refs, &assets_ref_id, &assets_name, Some(&assets_ref), "folder.assetcatalog");
@@ -806,7 +848,6 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
       for prof in &profile_names {
         let id = random_id();
         build_cfg(&mut cfgs, &id, prof, |s| {
-
           if let Some(id) = team {
             write!(s, "        DEVELOPMENT_TEAM = {};\n", id).unwrap();
           }
@@ -1077,8 +1118,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
                     "      projectDirPath = {2:?};\n",
                     "      projectRoot = \"\";\n",
                     "      targets = (\n"),
-         main_group.id, main_group.groups.last().unwrap().id,
-         pathdiff::diff_paths(&ctx.input_dir, &ctx.build_dir).unwrap())?;
+         main_group.id, main_group.groups.last().unwrap().id, input_root)?;
 
   for data in targets.iter().flatten().flatten() {
       write!(f, "        {} /* {} */,\n", data.target_id, &data.product_name)?;
@@ -1124,7 +1164,6 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
   Ok(())
 }
 
-// TODO target app icons
 // TODO deployment targets
 
 // TODO build settings
@@ -1146,8 +1185,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
 // TODO PBXHeadersBuildPhase
 // ???? for all library header files?
 
-// TODO PBXResourcesBuildPhase
-// - storyboards, xcassets
+// TODO support storyboards
 
 // TODO PBXCopyFilesBuildPhase
 // {} /* CopyFiles */ = {
