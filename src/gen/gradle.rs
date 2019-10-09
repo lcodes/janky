@@ -1,3 +1,6 @@
+use std::fs::File;
+use std::io::Write;
+
 use crate::ctx::{Context, Generator, PlatformType, RunResult};
 
 pub struct Gradle;
@@ -17,25 +20,55 @@ impl Generator for Gradle {
     }
   }
 
-  fn run(&self, _ctx: &Context) -> RunResult {
+  fn run(&self, ctx: &Context) -> RunResult {
+    // <target>/build.gradle
+
+    write_root_build(&ctx)?;
+    write_properties(&ctx)?;
+    write_settings(ctx)?;
     Ok(())
   }
 }
 
-// build.gradle
+type IO = std::io::Result<()>;
 
-/*
-
-android {
-  defaultConfig {}
-  buildTypes {}
-
-  externalNativeBuild {
-    cmake {
-      path "CMakeLists.txt",
-      version "3.10.2"
-    }
-  }
+fn write_target_build(ctx: &Context) -> IO {
+  Ok(())
 }
 
-*/
+fn write_root_build(ctx: &Context) -> IO {
+  let mut f = File::create(ctx.build_dir.join("build.gradle"))?;
+  f.write(concat!("buildscript {\n",
+                  "  repositories {\n",
+                  "    google()\n",
+                  "    jcenter()\n",
+                  "  }\n\n",
+                  "  dependencies {\n",
+                  "    classpath 'com.android.tools.build:gradle:3.5.0'\n",
+                  "  }\n",
+                  "}\n\n",
+                  "allprojects {\n",
+                  "  repositories {\n",
+                  "    google()\n",
+                  "    jcenter()\n",
+                  "  }\n",
+                  "}\n\n",
+                  "task clean(type: Delete) {\n",
+                  "  delete rootProject.buildDir\n",
+                  "}\n").as_bytes())?;
+  Ok(())
+}
+
+fn write_properties(ctx: &Context) -> IO {
+  let mut f = File::create(ctx.build_dir.join("gradle.properties"))?;
+  f.write(b"org.gradle.jvmargs=-Xmx8g\n")?;
+  Ok(())
+}
+
+fn write_settings(ctx: &Context) -> IO {
+  let mut f = File::create(ctx.build_dir.join("settings.gradle"))?;
+  f.write(b"include ")?;
+  // ':target1', ':target2', ...
+  f.write(b"\n")?;
+  Ok(())
+}

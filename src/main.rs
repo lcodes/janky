@@ -97,8 +97,8 @@ fn main() {
     });
   }
 
-  #[cfg(debug_assertions)]
-  println!("{:#?}", project);
+  // #[cfg(debug_assertions)]
+  // println!("{:#?}", project);
 
   // Execute the requested command.
   let ctx = ctx::Context {
