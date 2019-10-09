@@ -183,7 +183,7 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
 
   // TODO project references
 
-  let files = &ctx.files[index];
+  let files = &ctx.sources[index];
   match proj.kind {
     ProjKind::Android => {
 

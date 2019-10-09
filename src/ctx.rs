@@ -45,10 +45,12 @@ pub struct Context<'a> {
   pub input_dir: PathBuf,
   pub build_dir: PathBuf,
 
-  pub env:      &'a Env,
-  pub args:     &'a ArgMatches<'a>,
-  pub project:  &'a Project<'a>,
-  pub files:    &'a AllFiles,
+  pub env:       &'a Env,
+  pub args:      &'a ArgMatches<'a>,
+  pub project:   &'a Project<'a>,
+  pub sources:   &'a AllFiles,
+  pub resources: &'a AllFiles,
+  pub assets:    &'a AllFiles,
 
   pub profiles: Profiles<'a>
 }
@@ -210,8 +212,16 @@ pub struct Target<'a> {
   #[serde(rename = "type")]
   pub target_type: TargetType,
 
+  /// Source code files (h, hpp, c, cpp, m, mm, etc)
   #[serde(borrow)]
-  pub files: Vec<&'a str>,
+  pub sources: Vec<&'a str>,
+
+  /// Resource data files (copied to target, platform-independent)
+  #[serde(default)]
+  pub resources: Vec<&'a str>,
+
+  /// Asset data files (embedded in target, platform-specific rules)
+  pub assets: Option<&'a str>,
 
   #[serde(default)]
   pub depends: Vec<&'a str>,

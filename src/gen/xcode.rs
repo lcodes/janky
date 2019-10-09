@@ -71,12 +71,14 @@
 //! - https://en.wikipedia.org/wiki/Property_list
 //! - http://monoobjc.net/xcode-project-file-format.html
 
+use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, create_dir_all};
 use std::io::Write as IOWrite;
 use std::path::PathBuf;
+use std::str::from_utf8;
 
 use crate::ctx::{Context, Generator, PlatformType, RunResult, Target, TargetType};
 
@@ -116,8 +118,6 @@ impl Generator for XCode {
     let team = match &ctx.env.jank_xcode_team {
       None => None,
       Some(name) => {
-        use std::str::from_utf8;
-
         team_output = std::process::Command::new("sh")
           .args(&["-c", format!(concat!("certtool y | ",
                                         "grep \"Org \\+: {}\" -B 1 | ",
@@ -289,8 +289,8 @@ impl CfgList {
   }
 }
 
-fn build_file(phase: &mut String, files: &mut String, file_name: &'_ str,
-                  ref_id: &'_ str, phase_name: &'_ str)
+fn build_file(phase: &mut String, files: &mut String, file_name: &str,
+              ref_id: &str, phase_name: &str)
 {
   let id = random_id();
   write!(phase, "        {} /* {} in {} */,\n", id, file_name, phase_name).unwrap();
@@ -372,6 +372,216 @@ fn write_info_plist(path: &PathBuf) -> IO {
   Ok(())
 }
 
+#[derive(Serialize)]
+struct AssetInfo {
+  pub version: u32,
+  pub author:  &'static str
+}
+
+impl AssetInfo {
+  fn new() -> Self {
+    AssetInfo {
+      version: 1,
+      author:  "janky"
+    }
+  }
+}
+
+#[derive(Serialize)]
+struct Asset<'a> {
+  pub size:     &'static str,
+  pub idiom:    &'static str,
+  pub filename: String,
+  pub role:     &'a str
+}
+
+#[derive(Serialize)]
+struct AssetLayer {
+  pub filename: String
+}
+
+#[derive(Serialize)]
+struct AssetImage<'a> {
+  pub idiom:    &'static str,
+  pub filename: String,
+  pub scale:    &'a str
+}
+
+#[derive(Serialize)]
+struct AssetContent<'a> {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub assets: Option<Vec<Asset<'a>>>,
+
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub layers: Option<Vec<AssetLayer>>,
+
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub images: Option<Vec<AssetImage<'a>>>,
+
+  pub info: AssetInfo,
+
+  #[serde(skip)]
+  pub name: &'a str,
+
+  #[serde(skip)]
+  pub layer: u8,
+
+  #[serde(skip)]
+  pub children: Vec<AssetContent<'a>>
+}
+
+impl Default for AssetContent<'_> {
+  fn default() -> Self {
+    AssetContent {
+      assets:   None,
+      layers:   None,
+      images:   None,
+      info:     AssetInfo::new(),
+      name:     "",
+      layer:    0,
+      children: Vec::new()
+    }
+  }
+}
+
+impl AssetContent<'_> {
+  fn find_child(&mut self) -> &mut Self {
+    &mut self.children[0]
+  }
+}
+
+fn fold_asset_tvos<'a>(asset: &mut AssetContent<'a>, p: &ParsedAsset<'a>) {
+  println!("{:?}", p);
+
+  match p.name {
+    "App Icon" |
+    "App Icon - App Store" => {
+      // asset.find_child(tvos_brand_assets, || {
+
+      // }).find_child(p.name, || {
+
+      // }).find_child(layer, || {
+
+      // }).find_child("Content.imageset", || {
+
+      // }).images.push();
+    },
+    "Top Shelf Image Wide" => {
+      match asset.children.iter_mut().find(|x| {
+        x.name == "Top Shelf Image Wide.imageset"
+      }) {
+        None => {
+          asset.children.push(AssetContent {
+            name:   "Top Shelf Image Wide.imageset",
+            images: Some(Vec::new()),
+            ..AssetContent::default()
+          });
+          asset.children.last_mut().unwrap()
+        },
+        Some(x) => {
+          x
+        }
+      }.images.as_mut().unwrap().push(AssetImage {
+        idiom: "",
+        filename: String::new(),
+        scale: ""
+      });
+    },
+    "Launch Image" => {
+      // ???
+    },
+    &_ => {}
+  }
+}
+
+// TVOS Assets.xcassets
+// - App Icon & Top Shelf Image.brandassets [assets]
+//   - Top Shelf Image Wide.imageset [images]
+//   - App Icon - App Store.imagestack [layers]
+//     - <layer>.imagestacklayer
+//       - Content.imageset [images]
+//   - App Icon.imagestack [layers]
+//     - <layer>.imagestacklayer
+//       - Content.imageset [images]
+
+#[derive(Debug)]
+struct ParsedAsset<'a> {
+  pub path:  &'a PathBuf,
+  pub name:  &'a str,
+  pub layer: u8,
+  pub size:  u8
+}
+
+fn parse_asset<'a>(path: &'a PathBuf, s: &'a str) -> Option<ParsedAsset<'a>> {
+  let x = s.as_bytes();
+  let e = x.len();
+  if e < 10 || x[e-4] != b'.' { // A 1@1x.png
+    return None
+  }
+
+  let ext = &x[e-3..];
+  if ext != b"jpg" && ext != b"png" {
+    return None;
+  }
+
+  if x[e-5] != b'x' || !x[e-6].is_ascii_digit() || x[e-7] != b'@' {
+    return None;
+  }
+
+  let size = x[e-6] - b'0';
+  let name;
+
+  let layer = if x[e-8].is_ascii_digit() && x[e-9] == b' ' {
+    name = from_utf8(&x[0..e-9]).unwrap();
+    x[e-8] - b'0'
+  }
+  else {
+    name = from_utf8(&x[0..e-7]).unwrap();
+    0
+  };
+
+  Some(ParsedAsset { path, name, layer, size })
+}
+
+fn write_contents_json(path: &PathBuf, content: &AssetContent) -> IO {
+  create_dir_all(&path)?;
+  serde_json::to_writer_pretty(File::create(path.join("Contents.json"))?, content)?;
+
+  for child in &content.children {
+    write_contents_json(&path.join(child.name), &child)?;
+  }
+
+  Ok(())
+}
+
+fn write_file_ref(s: &mut String, id: &str, name: &str, path: &PathBuf, pbx_type: &str) {
+  write!(s, concat!("    {0} /* {1} */ = {{",
+                    "isa = PBXFileReference; ",
+                    "lastKnownFileType = {3}; ",
+                    "name = \"{1}\"; ",
+                    "path = {2:?}; ",
+                    "sourceTree = \"<group>\"; }};\n"),
+         id, name, path, pbx_type).unwrap();
+}
+
+fn write_build_phase(s: &mut String, id: &str, phase: &str) {
+  write!(s, concat!("    {0} /* {1} */ = {{\n",
+                               "      isa = PBX{1}BuildPhase;\n",
+                               "      buildActionMask = 2147483647;\n",
+                               "      files = (\n"),
+         id, phase).unwrap();
+
+}
+
+fn pretty_name<'a>(prettify: bool, name: &'a str, platform: PlatformType) -> Cow<'a, str> {
+  if prettify {
+    Cow::Owned([name, " (", platform.to_str(), ")"].join(""))
+  }
+  else {
+    Cow::from(name)
+  }
+}
+
 fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
   // Open the file for writing right away to bail out early on failure.
   let mut f = File::create(proj_dir.join("project.pbxproj"))?;
@@ -403,7 +613,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
       &mut main_group
     };
 
-    ctx.files.iter().flatten()
+    ctx.sources.iter().flatten()
       .filter(|info| info.meta.is_file())
       .fold(HashMap::<&PathBuf, FileStats>::new(), |mut m, info| {
         m.entry(&info.path)
@@ -417,13 +627,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
           .or_insert_with(|| {
             let id = random_id();
             let (phase, pbx_type) = get_file_type(info.extension());
-            write!(&mut refs, concat!("    {0} /* {1} */ = {{",
-                                      "isa = PBXFileReference; ",
-                                      "lastKnownFileType = {3}; ",
-                                      "name = {1}; ",
-                                      "path = {2:?}; ",
-                                      "sourceTree = \"<group>\"; }};\n"),
-                   id, info.name(), info.path(), pbx_type).unwrap();
+            write_file_ref(&mut refs, &id, info.name(), info.path(), pbx_type);
             FileStats { id, phase, pbx_type, num_targets: 1 }
           });
         m
@@ -470,37 +674,100 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
       .collect();
 
     let has_multiple_platforms = platforms.len() > 1;
-    let target_files = &ctx.files[target_index];
+    let target_files = &ctx.sources[target_index];
     let data = &mut targets[target_index];
 
     let mut target_group = Group::new(Some(target_name), None);
-    {
-      let group = if ctx.project.info.xcode.group_by_target {
-        &mut target_group
-      }
-      else {
-        &mut main_group
-      };
+    let group = if ctx.project.info.xcode.group_by_target {
+      &mut target_group
+    }
+    else {
+      &mut main_group
+    };
 
-      for file_info in target_files {
-        if file_info.meta.is_dir() {continue}
-        let file = &file_stats[&file_info.path];
-        if file.num_targets == 1 {
-          group.push(&file.id, file_info.name()); // TODO map folders to sub-groups
-        }
+    for file_info in target_files {
+      if file_info.meta.is_dir() {continue}
+      let file = &file_stats[&file_info.path];
+      if file.num_targets == 1 {
+        group.push(&file.id, file_info.name()); // TODO map folders to sub-groups
       }
     }
 
     for (platform_index, platform) in platforms {
-      let mut cfg_list     = CfgList::new();
-      let mut build_phases = String::new();
+      let mut cfg_list       = CfgList::new();
+      let mut build_phases   = String::new();
+      let mut build_settings = String::new();
 
-      let gen_dir = PathBuf::from([target_name, "_", platform.to_str()].join(""));
-      let plist   = gen_dir.join("Info.plist");
-      create_dir_all(gen_dir)?;
-      write_info_plist(&ctx.build_dir.join(&plist))?;
+      // Initialize the target's build phases.
+      {
+        let sources_id   = random_id();
+        let resources_id = random_id(); // TODO frameworks too?
 
-      let plist_relative = gen_root.join(plist);
+        write_build_phase(&mut sources,   &sources_id, "Sources");
+        write_build_phase(&mut resources, &resources_id, "Resources");
+
+        write!(&mut build_phases, concat!("        {} /* Sources */,\n",
+                                          "        {} /* Resources */,\n"),
+               sources_id, resources_id).unwrap();
+      }
+
+      // Generate application assets.
+      if target.target_type == TargetType::Application {
+        let gen_dir = PathBuf::from([target_name, "_", platform.to_str()].join(""));
+        let plist   = gen_dir.join("Info.plist");
+        create_dir_all(&gen_dir)?;
+        write_info_plist(&ctx.build_dir.join(&plist))?;
+
+        let plist_name   = pretty_name(has_multiple_platforms, "Info.plist", platform);
+        let plist_ref    = gen_root.join(plist);
+        let plist_ref_id = random_id();
+        write_file_ref(&mut refs, &plist_ref_id, &plist_name, &plist_ref, "text.plist.xml");
+        group.push(&plist_ref_id, &plist_name);
+
+        write!(&mut build_settings, "        INFOPLIST_FILE = {:?};\n", plist_ref).unwrap();
+
+        // TODO group by platform in data?
+        if let Some(dir) = target.assets {
+          let platform_pattern = match platform {
+            PlatformType::MacOS   => "/macos/",
+            PlatformType::IOS     => "/ios/",
+            PlatformType::TVOS    => "/tvos/",
+            PlatformType::WatchOS => "/watchos/",
+            _                     => unreachable!()
+          };
+          let assets_pattern = [dir, platform_pattern].join("");
+          let assets = ctx.assets[target_index].iter()
+            .filter(|info| info.meta.is_file() && info.to_str().starts_with(&assets_pattern))
+            .map   (|info| parse_asset(&info.path, &info.to_str()[assets_pattern.len()..]))
+            .flatten()
+            .fold(AssetContent {
+              name: "Assets.xcassets",
+              ..AssetContent::default()
+            }, |mut assets, parsed| {
+              fold_asset_tvos(&mut assets, &parsed); // TODO generic platform
+              assets
+            });
+
+          let assets_path = gen_dir.join(assets.name);
+          write_contents_json(&ctx.build_dir.join(&assets_path), &assets)?;
+
+          let assets_name   = pretty_name(has_multiple_platforms, assets.name, platform);
+          let assets_ref    = gen_root.join(assets_path);
+          let assets_ref_id = random_id();
+          build_file(&mut resources, &mut files, &assets_name, &assets_ref_id, "Resources");
+          write_file_ref(&mut refs, &assets_ref_id, &assets_name, &assets_ref, "folder.assetcatalog");
+          group.push(&assets_ref_id, assets.name);
+
+          write!(&mut build_settings, "        ASSETCATALOG_COMPILER_APPICON_NAME = \"{}\";\n",
+                 match platform {
+                   PlatformType::MacOS   |
+                   PlatformType::IOS     |
+                   PlatformType::WatchOS => "App Icon",
+                   PlatformType::TVOS    => "App Icon & Top Shelf Image",
+                   _                     => unreachable!()
+                 }).unwrap();
+        }
+      }
 
       // Generate the build configurations for this target.
       for prof in &profile_names {
@@ -512,12 +779,10 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
             write!(s, "        DEVELOPMENT_TEAM = {};\n", id).unwrap();
           }
 
+          write!(s, "{}", build_settings).unwrap();
+
           if target.target_type == TargetType::Application {
-            // TODO get app icon resource
-            write!(s, concat!("        ASSETCATALOG_COMPILER_APPICON_NAME = \"\";\n",
-                              "        CODE_SIGN_STYLE = Automatic;\n",
-                              "        INFOPLIST_FILE = {:?};\n"),
-                   plist_relative).unwrap();
+            write!(s, concat!("        CODE_SIGN_STYLE = Automatic;\n")).unwrap();
           }
 
           // TODO libraries
@@ -534,7 +799,6 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
           // CURRENT_PROJECT_VERSION = 1;
           // DEFINE_MODULES = YES;
           // DYLIB_INSTALL_NAME_BASE = "@rpath";
-          // INFOPLIST_FILE = "{}";
           // LD_RUNPATH_SEARCH_PATHS = (
           //   "$(inherited)",
           //   "@executable_path/Frameworks",
@@ -609,25 +873,6 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
         // profiles.clear();
       }
 
-      // Initialize the target's build phases.
-      let sources_id   = random_id();
-      let resources_id = random_id(); // TODO frameworks too?
-      write!(&mut sources, concat!("    {} /* Sources */ = {{\n",
-                                   "      isa = PBXSourcesBuildPhase;\n",
-                                   "      buildActionMask = 2147483647;\n",
-                                   "      files = (\n"),
-             sources_id).unwrap();
-
-      // TODO other phases
-      write!(&mut build_phases, "        {} /* Sources */,\n", sources_id).unwrap();
-
-      let target_rename = if has_multiple_platforms {
-        Cow::Owned([target_name, " (", platform.to_str(), ")"].join(""))
-      }
-      else {
-        Cow::from(*target_name)
-      };
-
       // Generate the build files for this target.
       for file_info in target_files {
         if file_info.meta.is_dir() {continue} // TODO
@@ -642,10 +887,11 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
       }
 
       // Finalize the target's build phase objects.
-      // TODO other phases
-      sources.push_str(concat!("      );\n",
-                               "      runOnlyForDeploymentPostprocessing = 0;\n",
-                               "    };\n"));
+      const BUILD_PHASE_END: &str = concat!("      );\n",
+                                            "      runOnlyForDeploymentPostprocessing = 0;\n",
+                                            "    };\n");
+      sources.push_str(BUILD_PHASE_END);
+      resources.push_str(BUILD_PHASE_END);
 
       // Generate the target's product.
       let target_id   = random_id();
@@ -676,8 +922,8 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
 
       // Finalize this target.
       data[platform_index] = Some(TargetData {
+        target_rename: pretty_name(has_multiple_platforms, target_name, platform),
         target,
-        target_rename,
         target_id,
         product_id,
         cfg_list,

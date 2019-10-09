@@ -84,14 +84,20 @@ fn main() {
 
   (!project.targets.is_empty()).check(|| "No targets in project configuration");
 
-  let mut files = ctx::AllFiles::new();
+  let sources   = find_all_files(&input_dir, &project.targets, |x| &x.sources);
+  let resources = find_all_files(&input_dir, &project.targets, |x| &x.resources);
+
+  let mut assets = ctx::AllFiles::new();
   for (name, target) in &project.targets {
-    files.push(find_files(&input_dir, target)
-               .check(|| format!("Failed to resolve files for target {}", name)));
+    assets.push(match target.assets {
+      None      => Vec::new(),
+      Some(dir) => find_files(&input_dir, &[[dir, "/**/*"].join("").as_str()])
+        .check(|| format!("Failed to resolve assets for target {}", name))
+    });
   }
 
   #[cfg(debug_assertions)]
-  println!("{:#?}\n{:#?}", project, files);
+  println!("{:#?}", project);
 
   // Execute the requested command.
   let ctx = ctx::Context {
@@ -100,11 +106,13 @@ fn main() {
     generators,
     input_dir,
     build_dir,
-    env:      &env,
-    args:     &args,
-    project:  &project,
-    files:    &files,
-    profiles: ctx::Settings::defaults()
+    env:       &env,
+    args:      &args,
+    project:   &project,
+    sources:   &sources,
+    resources: &resources,
+    assets:    &assets,
+    profiles:  ctx::Settings::defaults()
   };
 
   let cmd_name = ctx.args.subcommand_name().unwrap_or("gen");
@@ -142,9 +150,22 @@ fn is_supported(min_version: &str) -> ctx::DynResult<()> {
   Ok(())
 }
 
-fn find_files(dir: &PathBuf, target: &ctx::Target) -> ctx::DynResult<ctx::TargetFiles> {
+fn find_all_files<'a, F>(input_dir: &PathBuf,
+                         targets: &'a std::collections::HashMap<&str, ctx::Target<'a>>,
+                         get_patterns: F) -> ctx::AllFiles where
+  F: Fn(&'a ctx::Target<'a>) -> &Vec<&str>
+{
+  let mut files = ctx::AllFiles::new();
+  for (name, target) in targets {
+    files.push(find_files(&input_dir, get_patterns(target))
+               .check(|| format!("Failed to resolve files for target {}", name)));
+  }
+  files
+}
+
+fn find_files(dir: &PathBuf, patterns: &[&str]) -> ctx::DynResult<ctx::TargetFiles> {
   let mut files = Vec::new();
-  for pattern in &target.files {
+  for pattern in patterns {
     for m in glob::glob(dir.join(pattern).to_str().unwrap())? {
       let path = PathBuf::from(m?.strip_prefix(dir)?);
       let meta = std::fs::metadata(dir.join(&path))?;

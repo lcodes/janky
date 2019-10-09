@@ -26,6 +26,7 @@ pathdiff   = { version = "0.1.0" }
 rand       = { version = "0.7.2" }
 semver     = { version = "0.9" }
 serde      = { version = "1.0.101", features = ["derive"] }
+serde_json = { version = "1.0.41" }
 serde_repr = { version = "0.1" }
 toml       = { version = "0.5" }
 uuid       = { git = "https://github.com/uuid-rs/uuid", features = ["v4"] }
