@@ -76,8 +76,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::fs::{File, create_dir_all, remove_file};
-use std::io::Write as IOWrite;
-use std::path::PathBuf;
+use std::io::{BufWriter, Write as IOWrite};
+use std::path::{Path, PathBuf};
 use std::str::from_utf8;
 
 use crate::ctx::{Context, Generator, PlatformType, RunResult, Target, TargetType};
@@ -141,10 +141,11 @@ impl Generator for XCode {
       }
     };
 
-    let mut proj_dir = ctx.build_dir.join(&ctx.project.name);
-    proj_dir.set_extension("xcodeproj");
-    create_dir_all(&proj_dir)?;
-    write_pbx(ctx, &proj_dir, team)?;
+    let mut path = ctx.build_dir.join(&ctx.project.name);
+    path.set_extension("xcodeproj");
+    create_dir_all(&path)?;
+    path.push("project.pbxproj");
+    write_pbx(ctx, &path, team)?;
     Ok(())
   }
 }
@@ -194,9 +195,10 @@ struct FileStats {
 
 struct TargetData<'a> {
   target:       &'a Target<'a>,
-  product_name: Cow<'a, str>,
   target_id:    String,
+  target_name:  &'a str,
   product_id:   String,
+  product_name: Cow<'a, str>,
   cfg_list:     CfgList,
   build_phases: String
 }
@@ -228,7 +230,7 @@ impl<'a> Group<'a> {
     write!(&mut self.children, "        {} /* {} */,\n", id, name).unwrap();
   }
 
-  fn push_path(&mut self, id: &str, path: &'a PathBuf) {
+  fn push_path(&mut self, id: &str, path: &'a Path) {
     let mut parts = path.iter();
     let mut curr  = parts.next().unwrap();
     let mut next  = parts.next();
@@ -260,13 +262,14 @@ impl<'a> Group<'a> {
     self.groups.push(child);
   }
 
-  fn write(&self, f: &mut File) -> IO {
-    write!(f, concat!("    {} = {{\n",
+  fn write<W>(&self, f: &mut W) -> IO where W: IOWrite {
+    write!(f, concat!("    {id} = {{\n",
                       "      isa = PBXGroup;\n",
                       "      children = (\n",
-                      "{}",
+                      "{children}",
                       "      );\n"),
-           self.id, self.children)?;
+           id       = self.id,
+           children = self.children)?;
 
     if let Some(x) = self.path {
       write!(f, "      path = \"{}\";\n", x)?;
@@ -304,16 +307,19 @@ impl CfgList {
     write!(&mut self.cfgs, "        {} /* {} */,\n", id, name).unwrap();
   }
 
-  fn write(&self, f: &mut File, kind: &str, name: &str) -> IO {
-    write!(f, concat!("    {} /* Build configuration list for {} \"{}\" */ = {{\n",
+  fn write<W>(&self, f: &mut W, kind: &str, name: &str) -> IO where W: IOWrite {
+    write!(f, concat!("    {id} /* Build configuration list for {kind} \"{name}\" */ = {{\n",
                       "      isa = XCConfigurationList;\n",
                       "      buildConfigurations = (\n",
-                      "{}",
+                      "{cfgs}",
                       "      );\n",
                       "      defaultConfigurationIsVisible = 0;\n",
                       "      defaultConfigurationName = Release;\n",
                       "    }};\n"),
-           self.id, kind, name, self.cfgs)?;
+           id   = self.id,
+           kind = kind,
+           name = name,
+           cfgs = self.cfgs)?;
     Ok(())
   }
 }
@@ -323,14 +329,17 @@ fn build_file(phase: &mut String, files: &mut String, file_name: &str,
 {
   let id = random_id();
   write!(phase, "        {} /* {} in {} */,\n", id, file_name, phase_name).unwrap();
-  write!(files, concat!("    {0} /* {1} in {3} */ = {{",
+  write!(files, concat!("    {id} /* {name} in {phase} */ = {{",
                         "isa = PBXBuildFile; ",
-                        "fileRef = {2} /* {1} */; }};\n"),
-         id, file_name, ref_id, phase_name).unwrap();
+                        "fileRef = {refid} /* {name} */; }};\n"),
+         id    = id,
+         name  = file_name,
+         refid = ref_id,
+         phase = phase_name).unwrap();
 }
 
 fn build_cfg<F>(cfg: &mut String, id: &str, name: &str, f: F) where F: FnOnce(&mut String) {
-  write!(cfg, concat!("    {0} /* {1} */ = {{\n",
+  write!(cfg, concat!("    {} /* {} */ = {{\n",
                       "      isa = XCBuildConfiguration;\n",
                       "      buildSettings = {{\n"),
          id, name).unwrap();
@@ -338,7 +347,7 @@ fn build_cfg<F>(cfg: &mut String, id: &str, name: &str, f: F) where F: FnOnce(&m
   f(cfg);
 
   write!(cfg, concat!("      }};\n",
-                      "      name = {0};\n",
+                      "      name = {};\n",
                       "    }};\n"),
          name).unwrap();
 }
@@ -371,7 +380,7 @@ fn get_file_type(ext: &'_ str) -> (Phase, &'static str) {
   }
 }
 
-fn write_info_plist(path: &PathBuf) -> IO {
+fn write_info_plist(path: &Path) -> IO {
   let mut f = File::create(path)?;
 
   write!(f, concat!(r#"<?xml version="1.0" encoding="UTF-8"?>"#, "\n",
@@ -398,6 +407,7 @@ fn write_info_plist(path: &PathBuf) -> IO {
                     "</dict>\n",
                     "</plist>\n"))?;
 
+  f.flush()?;
   Ok(())
 }
 
@@ -436,7 +446,7 @@ struct AssetImage<'a> {
   pub scale:    &'static str,
 
   #[serde(skip)]
-  pub path: &'a PathBuf
+  pub path: &'a Path
 }
 
 #[derive(Serialize)]
@@ -567,22 +577,24 @@ fn fold_asset_tvos<'a, 'b>(asset: &'b mut AssetContent<'a>, p: &ParsedAsset<'a>)
 
 #[derive(Debug)]
 struct ParsedAsset<'a> {
-  pub path:  &'a PathBuf,
+  pub path:  &'a Path,
   pub name:  &'a str,
   pub layer: u8,
   pub size:  u8
 }
 
-fn parse_asset<'a>(path: &'a PathBuf, s: &'a str) -> Option<ParsedAsset<'a>> {
+fn parse_asset<'a>(path: &'a Path, s: &'a str) -> Option<ParsedAsset<'a>> {
   let x = s.as_bytes();
   let e = x.len();
   if e < 10 || x[e-4] != b'.' { // A 1@1x.png
     return None
   }
 
-  let ext = &x[e-3..];
-  if ext != b"jpg" && ext != b"png" {
-    return None;
+  {
+    let ext = &x[e-3..];
+    if ext != b"jpg" && ext != b"png" {
+      return None;
+    }
   }
 
   if x[e-5] != b'x' || !x[e-6].is_ascii_digit() || x[e-7] != b'@' {
@@ -604,9 +616,13 @@ fn parse_asset<'a>(path: &'a PathBuf, s: &'a str) -> Option<ParsedAsset<'a>> {
   Some(ParsedAsset { path, name, layer, size })
 }
 
-fn write_contents_json(root: &PathBuf, path: &PathBuf, content: &AssetContent) -> IO {
+fn write_contents_json(root: &Path, path: &Path, content: &AssetContent) -> IO {
   create_dir_all(&path)?;
-  serde_json::to_writer_pretty(File::create(path.join("Contents.json"))?, content)?;
+  {
+    let mut f = BufWriter::new(File::create(path.join("Contents.json"))?);
+    serde_json::to_writer_pretty(&mut f, content)?;
+    f.flush()?;
+  }
 
   for image in &content.images {
     let target = path.join(image.path.file_name().unwrap());
@@ -614,7 +630,9 @@ fn write_contents_json(root: &PathBuf, path: &PathBuf, content: &AssetContent) -
       remove_file(&target)?;
     }
 
-    std::os::unix::fs::symlink(pathdiff::diff_paths(&root, &target).unwrap().join(image.path), &target)?;
+    let mut src = pathdiff::diff_paths(&root, &target).unwrap();
+    src.push(image.path);
+    std::os::unix::fs::symlink(src, &target)?;
   }
 
   for child in &content.children {
@@ -624,12 +642,14 @@ fn write_contents_json(root: &PathBuf, path: &PathBuf, content: &AssetContent) -
   Ok(())
 }
 
-fn write_file_ref(s: &mut String, id: &str, name: &str, path: Option<&PathBuf>, pbx_type: &str) {
-  write!(s, concat!("    {0} /* {1} */ = {{",
+fn write_file_ref(s: &mut String, id: &str, name: &str, path: Option<&Path>, pbx_type: &str) {
+  write!(s, concat!("    {id} /* {name} */ = {{",
                     "isa = PBXFileReference; ",
-                    "lastKnownFileType = {2}; ",
-                    "name = \"{1}\"; "),
-         id, name, pbx_type).unwrap();
+                    "lastKnownFileType = {file}; ",
+                    "name = \"{name}\"; "),
+         id   = id,
+         name = name,
+         file = pbx_type).unwrap();
 
   if let Some(p) = path {
     write!(s, "path = {:?}; ", p).unwrap();
@@ -639,11 +659,12 @@ fn write_file_ref(s: &mut String, id: &str, name: &str, path: Option<&PathBuf>, 
 }
 
 fn write_build_phase(s: &mut String, id: &str, phase: &str) {
-  write!(s, concat!("    {0} /* {1} */ = {{\n",
-                               "      isa = PBX{1}BuildPhase;\n",
+  write!(s, concat!("    {id} /* {phase} */ = {{\n",
+                               "      isa = PBX{phase}BuildPhase;\n",
                                "      buildActionMask = 2147483647;\n",
                                "      files = (\n"),
-         id, phase).unwrap();
+         id    = id,
+         phase = phase).unwrap();
 
 }
 
@@ -656,9 +677,9 @@ fn pretty_name(prettify: bool, name: &str, platform: PlatformType) -> Cow<'_, st
   }
 }
 
-fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
+fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   // Open the file for writing right away to bail out early on failure.
-  let mut f = File::create(proj_dir.join("project.pbxproj"))?;
+  let mut f = BufWriter::new(File::create(path)?);
 
   // Prepare to collect all the required data to generate the PBX objects.
   let     project_id    = random_id();
@@ -744,7 +765,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
     let platforms: Vec<(usize, PlatformType)> = PLATFORMS.iter().cloned().enumerate()
       .filter(|(_, p)| {
         // TODO also filter away unsupported architectures here?
-        ctx.project.filter.matches_platform(p) && target.filter.matches_platform(p)
+        ctx.project.filter.matches_platform(*p) && target.filter.matches_platform(*p)
       })
       .collect();
 
@@ -788,9 +809,10 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
 
       // Generate application assets.
       if target.target_type == TargetType::Application {
-        // TODO don't generate info.plist if it exists in assets
         let gen_dir = PathBuf::from([target_name, "_", platform.to_str()].join(""));
-        let plist   = gen_dir.join("Info.plist");
+
+        // TODO don't generate info.plist if it exists in assets
+        let plist = gen_dir.join("Info.plist");
         create_dir_all(&gen_dir)?;
         write_info_plist(&ctx.build_dir.join(&plist))?;
 
@@ -969,19 +991,21 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
       resources.push_str(BUILD_PHASE_END);
 
       // Generate the target's product.
-      let target_id    = random_id();
       let product_id   = random_id();
-      let product_ext  = get_target_ext(target.target_type);
       let product_name = pretty_name(has_multiple_platforms, target_name, platform);
-      write!(&mut refs, concat!("    {0} /* {1}{2} */ = {{",
+      let target_ext   = get_target_ext(target.target_type);
+      write!(&mut refs, concat!("    {product_id} /* {target_name}{target_ext} */ = {{",
                                 "isa = PBXFileReference; ",
-                                "explicitFileType = {4}; ",
+                                "explicitFileType = {target_type}; ",
                                 "includeInIndex = 0; ",
-                                "name = \"{3}\"; ",
-                                "path = \"{1}{2}\"; ",
+                                "name = \"{product_name}\"; ",
+                                "path = \"{target_name}{target_ext}\"; ",
                                 "sourceTree = BUILT_PRODUCTS_DIR; }};\n"),
-             product_id, target_name, product_ext, product_name,
-             match target.target_type {
+             product_id   = product_id,
+             product_name = product_name,
+             target_name  = target_name,
+             target_ext   = target_ext,
+             target_type  = match target.target_type {
                TargetType::Auto          |
                TargetType::None          |
                TargetType::Custom        => unreachable!(),
@@ -995,14 +1019,15 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
              }).unwrap();
 
       write!(&mut product_group.children, "        {} /* {}{} */,\n",
-             product_id, target_name, product_ext).unwrap();
+             product_id, target_name, target_ext).unwrap();
 
       // Finalize this target.
       data[platform_index] = Some(TargetData {
-        product_name,
+        target_id: random_id(),
         target,
-        target_id,
+        target_name,
         product_id,
+        product_name,
         cfg_list,
         build_phases
       });
@@ -1029,19 +1054,21 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
                     "  objects = {{\n",
                     "\n",
                     "/* Begin PBXBuildFile section */\n",
-                    "{}",
+                    "{files}",
                     "/* End PBXBuildFile section */\n",
                     "\n",
                     "/* Begin PBXFileReference section */\n",
-                    "{}",
+                    "{refs}",
                     "/* End PBXFileReference section */\n",
                     "\n",
                     "/* Begin PBXFrameworksBuildPhase section */\n",
-                    "{}",
+                    "{frameworks}",
                     "/* End PBXFrameworksBuildPhase section */\n",
                     "\n",
                     "/* Begin PBXGroup section */\n"),
-         files, refs, frameworks)?;
+         files = files,
+         refs  = refs,
+         frameworks = frameworks)?;
 
   main_group.write(&mut f)?;
 
@@ -1050,25 +1077,30 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
                     "/* Begin PBXNativeTarget section */\n"))?;
 
   for data in targets.iter().flatten().flatten() {
-    write!(f, concat!("    {0} /* {1} */ = {{\n",
+    write!(f, concat!("    {target_id} /* {product_name} */ = {{\n",
                       "      isa = PBXNativeTarget;\n",
-                      "      buildConfigurationList = {4} /* ",
-                      "Build configuration list for PBXNativeTarget \"{1}\" */;\n",
+                      "      buildConfigurationList = {cfg_list_id} /* ",
+                      "Build configuration list for PBXNativeTarget \"{product_name}\" */;\n",
                       "      buildPhases = (\n",
-                      "{3}",
+                      "{build_phases}",
                       "      );\n",
                       "      buildRules = (\n",
                       "      );\n",
                       "      dependencies = (\n",
                       "      );\n",
-                      "      name = \"{1}\";\n",
-                      "      productName = \"{1}\";\n",
-                      "      productReference = {5} /* {1}{2} */;\n",
-                      "      productType = \"com.apple.product-type.{6}\";\n",
+                      "      name = \"{product_name}\";\n",
+                      "      productName = \"{product_name}\";\n",
+                      "      productReference = {product_id} /* {target_name}{target_ext} */;\n",
+                      "      productType = \"com.apple.product-type.{product_type}\";\n",
                       "    }};\n"),
-           data.target_id, &data.product_name, get_target_ext(data.target.target_type),
-           data.build_phases, data.cfg_list.id, data.product_id,
-           match data.target.target_type {
+           target_id    = data.target_id,
+           target_name  = data.target_name,
+           target_ext   = get_target_ext(data.target.target_type),
+           product_id   = data.product_id,
+           product_name = &data.product_name,
+           cfg_list_id  = data.cfg_list.id,
+           build_phases = data.build_phases,
+           product_type = match data.target.target_type {
              TargetType::Auto |
              TargetType::None |
              TargetType::Custom        => unreachable!(),
@@ -1082,43 +1114,47 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
   write!(f, concat!("/* End PBXNativeTarget section */\n",
                     "\n",
                     "/* Begin PBXProject section */\n",
-                    "    {} /* Project object */ = {{\n",
+                    "    {project_id} /* Project object */ = {{\n",
                     "      isa = PBXProject;\n",
                     "      attributes = {{\n",
                     "        BuildIndependentTargetsInParallel = YES;\n",
                     "        LastUpgradeCheck = 1100;\n",
-                    "        ORGANIZATIONNAME = \"{}\";\n",
+                    "        ORGANIZATIONNAME = \"{organization}\";\n",
                     "        TargetAttributes = {{\n"),
-         project_id, "com.lambdacoder")?;
+         project_id   = project_id,
+         organization = "com.lambdacoder")?;
 
   for data in targets.iter().flatten().flatten() {
-    write!(f, concat!("          {} = {{\n",
+    write!(f, concat!("          {target_id} = {{\n",
                       "            CreatedOnToolsVersion = 11.0;\n",
                       "          }};\n"),
-           data.target_id)?;
+           target_id = data.target_id)?;
   }
 
   write!(f, concat!("        }};\n",
                     "      }};\n",
-                    "      buildConfigurationList = {} /* ",
-                    "Build configuration list for PBXProject \"{}\" */;\n",
+                    "      buildConfigurationList = {cfg_list_id} /* ",
+                    "Build configuration list for PBXProject \"{project_name}\" */;\n",
                     "      compatibilityVersion = \"Xcode 9.3\";\n",
                     "      developmentRegion = en;\n",
                     "      hasScannedForEncodings = 0;\n",
                     "      knownRegions = (\n"),
-         project_cfgs.id, ctx.project.name)?;
+         cfg_list_id  = project_cfgs.id,
+         project_name = ctx.project.name)?;
 
   for region in ["en", "Base"].iter() {
     write!(f, "       {},\n", region)?;
   }
 
   write!(f, concat!("      );\n",
-                    "      mainGroup = {0};\n",
-                    "      productRefGroup = {1} /* Products */;\n",
-                    "      projectDirPath = {2:?};\n",
+                    "      mainGroup = {main_group_id};\n",
+                    "      productRefGroup = {product_group_id} /* Products */;\n",
+                    "      projectDirPath = {project_dir_path:?};\n",
                     "      projectRoot = \"\";\n",
                     "      targets = (\n"),
-         main_group.id, main_group.groups.last().unwrap().id, input_root)?;
+         main_group_id    = main_group.id,
+         product_group_id = main_group.groups.last().unwrap().id,
+         project_dir_path = input_root)?;
 
   for data in targets.iter().flatten().flatten() {
       write!(f, "        {} /* {} */,\n", data.target_id, &data.product_name)?;
@@ -1130,23 +1166,26 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
                     "/* End PBXProject section */\n",
                     "\n",
                     "/* Begin PBXResourcesBuildPhase section */\n",
-                    "{}",
+                    "{resources}",
                     "/* End PBXResourcesBuildPhase section */\n",
                     "\n",
                     "/* Begin PBXSourcesBuildPhase section */\n",
-                    "{}",
+                    "{sources}",
                     "/* End PBXSourcesBuildPhase section */\n",
                     "\n",
                     "/* Begin PBXVariantGroup section */\n",
-                    "{}",
+                    "{variants}",
                     "/* End PBXVariantSection section */\n",
                     "\n",
                     "/* Begin XCBuildConfiguration section */\n",
-                    "{}",
+                    "{cfgs}",
                     "/* End XCBuildConfiguration section */\n",
                     "\n",
                     "/* Begin XCConfigurationList section */\n"),
-         resources, sources, variants, cfgs)?;
+         resources = resources,
+         sources   = sources,
+         variants  = variants,
+         cfgs      = cfgs)?;
 
   project_cfgs.write(&mut f, "PBXProject", &ctx.project.name)?;
 
@@ -1156,9 +1195,9 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
 
   write!(f, concat!("/* End XCConfigurationList section */\n",
                     "  }};\n",
-                    "  rootObject = {} /* Project object */;\n",
+                    "  rootObject = {project_id} /* Project object */;\n",
                     "}}\n"),
-         project_id)?;
+         project_id = project_id)?;
 
   f.flush()?;
   Ok(())

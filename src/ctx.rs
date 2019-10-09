@@ -184,20 +184,19 @@ pub struct TargetFilter {
   pub architectures: Vec<Architecture>
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
 impl TargetFilter {
-  pub fn matches_platform(&self, p: &PlatformType) -> bool {
+  pub fn matches_platform(&self, p: PlatformType) -> bool {
     if !self.platforms.is_empty() {
-      self.platforms.contains(p)
+      self.platforms.contains(&p)
     }
     else {
       true
     }
   }
 
-  pub fn matches_architecture(&self, a: &Architecture) -> bool {
+  pub fn matches_architecture(&self, a: Architecture) -> bool {
     if !self.architectures.is_empty() {
-      self.architectures.contains(a)
+      self.architectures.contains(&a)
     }
     else {
       true
