@@ -82,15 +82,7 @@ use std::str::from_utf8;
 
 use crate::ctx::{Context, Generator, PlatformType, RunResult, Target, TargetType};
 
-const PLATFORMS: [PlatformType; 4] = [
-  PlatformType::MacOS,
-  PlatformType::IOS,
-  PlatformType::TVOS,
-  PlatformType::WatchOS
-];
-
-pub struct XCode;
-
+// TODO move to ctx for reuse
 #[derive(Debug)]
 struct StrError(pub String);
 
@@ -106,6 +98,15 @@ impl std::error::Error for StrError {
   }
 }
 
+const PLATFORMS: [PlatformType; 4] = [
+  PlatformType::MacOS,
+  PlatformType::IOS,
+  PlatformType::TVOS,
+  PlatformType::WatchOS
+];
+
+pub struct XCode;
+
 impl Generator for XCode {
   fn supports_platform(&self, p: PlatformType) -> bool {
     assert!(p != PlatformType::Any);
@@ -114,7 +115,7 @@ impl Generator for XCode {
 
   // TODO check if any target matches before calling
   fn run(&self, ctx: &Context) -> RunResult {
-    let team_output;
+    let team_output; // Declared here so it outlives the borrows in `team`.
     let team = match &ctx.env.jank_xcode_team {
       None => None,
       Some(name) => {
@@ -152,6 +153,7 @@ type IO = std::io::Result<()>;
 
 fn random_id() -> String {
   // TODO semi-random IDs, try and prevent xcode from reordering objects
+  // TODO deterministic IDs? try and keep the same IDs between generator runs
   use rand::RngCore;
   let mut bytes: [u8; 12] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
   rand::thread_rng().fill_bytes(&mut bytes);
@@ -191,12 +193,12 @@ struct FileStats {
 }
 
 struct TargetData<'a> {
-  target:        &'a Target<'a>,
-  target_rename: Cow<'a, str>,
-  target_id:     String,
-  product_id:    String,
-  cfg_list:      CfgList,
-  build_phases:  String
+  target:       &'a Target<'a>,
+  product_name: Cow<'a, str>,
+  target_id:    String,
+  product_id:   String,
+  cfg_list:     CfgList,
+  build_phases: String
 }
 
 struct Group<'a> {
@@ -224,6 +226,33 @@ impl<'a> Group<'a> {
 
   fn push(&mut self, id: &str, name: &str) {
     write!(&mut self.children, "        {} /* {} */,\n", id, name).unwrap();
+  }
+
+  fn push_path(&mut self, id: &str, path: &'a PathBuf) {
+    let mut parts = path.iter();
+    let mut curr  = parts.next().unwrap();
+    let mut next  = parts.next();
+    let mut group = self;
+    loop {
+      let name = curr.to_str().unwrap();
+      match next {
+        None => {
+          group.push(id, name);
+          break;
+        },
+        Some(x) => {
+          curr  = x;
+          next  = parts.next();
+          group = match group.groups.iter().position(|x| x.path == Some(name)) {
+            Some(i) => &mut group.groups[i],
+            None    => {
+              group.push_group(Group::new(None, Some(name)));
+              group.groups.last_mut().unwrap()
+            }
+          };
+        }
+      }
+    }
   }
 
   fn push_group(&mut self, child: Group<'a>) {
@@ -436,10 +465,10 @@ impl Default for AssetContent<'_> {
       assets:   None,
       layers:   None,
       images:   None,
+      children: Vec::new(),
       info:     AssetInfo::new(),
       name:     "",
-      layer:    0,
-      children: Vec::new()
+      layer:    0
     }
   }
 }
@@ -554,14 +583,18 @@ fn write_contents_json(path: &PathBuf, content: &AssetContent) -> IO {
   Ok(())
 }
 
-fn write_file_ref(s: &mut String, id: &str, name: &str, path: &PathBuf, pbx_type: &str) {
+fn write_file_ref(s: &mut String, id: &str, name: &str, path: Option<&PathBuf>, pbx_type: &str) {
   write!(s, concat!("    {0} /* {1} */ = {{",
                     "isa = PBXFileReference; ",
-                    "lastKnownFileType = {3}; ",
-                    "name = \"{1}\"; ",
-                    "path = {2:?}; ",
-                    "sourceTree = \"<group>\"; }};\n"),
-         id, name, path, pbx_type).unwrap();
+                    "lastKnownFileType = {2}; ",
+                    "name = \"{1}\"; "),
+         id, name, pbx_type).unwrap();
+
+  if let Some(p) = path {
+    write!(s, "path = {:?}; ", p).unwrap();
+  }
+
+  write!(s, "sourceTree = \"<group>\"; }};\n").unwrap();
 }
 
 fn write_build_phase(s: &mut String, id: &str, phase: &str) {
@@ -573,7 +606,7 @@ fn write_build_phase(s: &mut String, id: &str, phase: &str) {
 
 }
 
-fn pretty_name<'a>(prettify: bool, name: &'a str, platform: PlatformType) -> Cow<'a, str> {
+fn pretty_name(prettify: bool, name: &str, platform: PlatformType) -> Cow<'_, str> {
   if prettify {
     Cow::Owned([name, " (", platform.to_str(), ")"].join(""))
   }
@@ -594,6 +627,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
   let mut refs          = String::new();
   let mut sources       = String::new();
   let mut resources     = String::new();
+  let mut frameworks    = String::new();
   let mut main_group    = Group::new(None, None);
   let mut shared_group  = Group::new(Some("Shared"), None);
   let mut product_group = Group::new(Some("Products"), None);
@@ -619,7 +653,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
         m.entry(&info.path)
           .and_modify(|e| {
             if e.num_targets == 1 {
-              group.push(&e.id, info.name());
+              group.push_path(&e.id, &info.path);
             }
 
             e.num_targets += 1;
@@ -627,7 +661,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
           .or_insert_with(|| {
             let id = random_id();
             let (phase, pbx_type) = get_file_type(info.extension());
-            write_file_ref(&mut refs, &id, info.name(), info.path(), pbx_type);
+            write_file_ref(&mut refs, &id, info.name(), None, pbx_type);
             FileStats { id, phase, pbx_type, num_targets: 1 }
           });
         m
@@ -652,8 +686,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
 
     let id = random_id();
     build_cfg(&mut cfgs, &id, prof, |s| {
-      write!(s, concat!("        ALWAYS_SEARCH_USER_PATHS = NO;\n",
-                        "        PRODUCT_NAME = \"$(TARGET_NAME)\";\n")).unwrap();
+      write!(s, concat!("        ALWAYS_SEARCH_USER_PATHS = NO;\n")).unwrap();
 
       write!(s, concat!("        CLANG_CXX_LANGUAGE_STANDARD = \"c++17\";\n",
                         "        GCC_C_LANGUAGE_STANDARD = c11;\n")).unwrap();
@@ -668,7 +701,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
   for (target_index, (target_name, target)) in ctx.project.targets.iter().enumerate() {
     let platforms: Vec<(usize, PlatformType)> = PLATFORMS.iter().cloned().enumerate()
       .filter(|(_, p)| {
-        // TODO also filter away unsupported platform architectures here?
+        // TODO also filter away unsupported architectures here?
         ctx.project.filter.matches_platform(p) && target.filter.matches_platform(p)
       })
       .collect();
@@ -689,7 +722,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
       if file_info.meta.is_dir() {continue}
       let file = &file_stats[&file_info.path];
       if file.num_targets == 1 {
-        group.push(&file.id, file_info.name()); // TODO map folders to sub-groups
+        group.push_path(&file.id, &file_info.path);
       }
     }
 
@@ -721,7 +754,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
         let plist_name   = pretty_name(has_multiple_platforms, "Info.plist", platform);
         let plist_ref    = gen_root.join(plist);
         let plist_ref_id = random_id();
-        write_file_ref(&mut refs, &plist_ref_id, &plist_name, &plist_ref, "text.plist.xml");
+        write_file_ref(&mut refs, &plist_ref_id, &plist_name, Some(&plist_ref), "text.plist.xml");
         group.push(&plist_ref_id, &plist_name);
 
         write!(&mut build_settings, "        INFOPLIST_FILE = {:?};\n", plist_ref).unwrap();
@@ -755,7 +788,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
           let assets_ref    = gen_root.join(assets_path);
           let assets_ref_id = random_id();
           build_file(&mut resources, &mut files, &assets_name, &assets_ref_id, "Resources");
-          write_file_ref(&mut refs, &assets_ref_id, &assets_name, &assets_ref, "folder.assetcatalog");
+          write_file_ref(&mut refs, &assets_ref_id, &assets_name, Some(&assets_ref), "folder.assetcatalog");
           group.push(&assets_ref_id, assets.name);
 
           write!(&mut build_settings, "        ASSETCATALOG_COMPILER_APPICON_NAME = \"{}\";\n",
@@ -773,7 +806,6 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
       for prof in &profile_names {
         let id = random_id();
         build_cfg(&mut cfgs, &id, prof, |s| {
-          // TODO PRODUCT_NAME ?
 
           if let Some(id) = team {
             write!(s, "        DEVELOPMENT_TEAM = {};\n", id).unwrap();
@@ -809,7 +841,9 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
           // VERSIONING_SYSTEM = "apple-generic";
           // VERSION_INFO_PREFIX = "";
 
-          write!(s, "        PRODUCT_BUNDLE_IDENTIFIER = com.lambdacoder.Jank;\n").unwrap(); // TODO
+          write!(s, concat!("        PRODUCT_NAME = \"{}\";\n",
+                            "        PRODUCT_BUNDLE_IDENTIFIER = com.lambdacoder.Jank;\n"),
+                 target_name).unwrap();
 
           match platform {
             PlatformType::MacOS => {
@@ -894,16 +928,18 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
       resources.push_str(BUILD_PHASE_END);
 
       // Generate the target's product.
-      let target_id   = random_id();
-      let product_id  = random_id();
-      let product_ext = get_target_ext(target.target_type);
+      let target_id    = random_id();
+      let product_id   = random_id();
+      let product_ext  = get_target_ext(target.target_type);
+      let product_name = pretty_name(has_multiple_platforms, target_name, platform);
       write!(&mut refs, concat!("    {0} /* {1}{2} */ = {{",
                                 "isa = PBXFileReference; ",
-                                "explicitFileType = {3}; ",
+                                "explicitFileType = {4}; ",
                                 "includeInIndex = 0; ",
+                                "name = \"{3}\"; ",
                                 "path = \"{1}{2}\"; ",
                                 "sourceTree = BUILT_PRODUCTS_DIR; }};\n"),
-             product_id, target_name, product_ext,
+             product_id, target_name, product_ext, product_name,
              match target.target_type {
                TargetType::Auto          |
                TargetType::None          |
@@ -922,7 +958,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
 
       // Finalize this target.
       data[platform_index] = Some(TargetData {
-        target_rename: pretty_name(has_multiple_platforms, target_name, platform),
+        product_name,
         target,
         target_id,
         product_id,
@@ -941,8 +977,6 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
   }
 
   main_group.push_group(product_group);
-
-  let frameworks = ""; // TODO
 
   // Finally, generate the project file.
   write!(f, concat!("// !$*UTF8*$!\n",
@@ -991,7 +1025,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
                       "      productReference = {5} /* {1}{2} */;\n",
                       "      productType = \"com.apple.product-type.{6}\";\n",
                       "    }};\n"),
-           data.target_id, &data.target_rename, get_target_ext(data.target.target_type),
+           data.target_id, &data.product_name, get_target_ext(data.target.target_type),
            data.build_phases, data.cfg_list.id, data.product_id,
            match data.target.target_type {
              TargetType::Auto |
@@ -1047,7 +1081,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
          pathdiff::diff_paths(&ctx.input_dir, &ctx.build_dir).unwrap())?;
 
   for data in targets.iter().flatten().flatten() {
-      write!(f, "        {} /* {} */,\n", data.target_id, &data.target_rename)?;
+      write!(f, "        {} /* {} */,\n", data.target_id, &data.product_name)?;
   }
 
   let variants = ""; // TODO
@@ -1077,7 +1111,7 @@ fn write_pbx(ctx: &Context, proj_dir: &PathBuf, team: Option<&str>) -> IO {
   project_cfgs.write(&mut f, "PBXProject", &ctx.project.name)?;
 
   for data in targets.iter().flatten().flatten() {
-    data.cfg_list.write(&mut f, "PBXNativeTarget", &data.target_rename)?;
+    data.cfg_list.write(&mut f, "PBXNativeTarget", &data.product_name)?;
   }
 
   write!(f, concat!("/* End XCConfigurationList section */\n",

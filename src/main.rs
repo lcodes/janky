@@ -1,3 +1,4 @@
+#![allow(clippy::cognitive_complexity)]
 #![allow(clippy::write_with_newline)]
 
 #![cfg_attr(debug_assertions, allow(dead_code))]
