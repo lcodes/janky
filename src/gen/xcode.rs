@@ -463,6 +463,9 @@ struct AssetContent<'a> {
   pub info: AssetInfo,
 
   #[serde(skip)]
+  pub write: bool,
+
+  #[serde(skip)]
   pub name: &'a str,
 
   #[serde(skip)]
@@ -480,6 +483,7 @@ impl Default for AssetContent<'_> {
       images:   Vec::new(),
       children: Vec::new(),
       info:     AssetInfo::new(),
+      write:    true,
       name:     "",
       layer:    0
     }
@@ -487,22 +491,22 @@ impl Default for AssetContent<'_> {
 }
 
 impl<'a> AssetContent<'a> {
-  fn child(&mut self, name: &'a str) -> &mut Self {
+  fn child(&mut self, name: &'a str, write: bool) -> &mut Self {
     match self.children.iter().position(|x| x.name == name) {
       Some(i) => &mut self.children[i],
       None    => {
-        self.children.push(AssetContent { name, ..AssetContent::default() });
+        self.children.push(AssetContent { name, write, ..AssetContent::default() });
         self.children.last_mut().unwrap()
       }
     }
   }
 
   fn brand(&mut self, size: &'static str, role: &'static str, filename: &'static str) -> &mut Self {
-    let mut brand = self.child("App Icon & Top Shelf Image.brandassets");
+    let mut brand = self.child("App Icon & Top Shelf Image.brandassets", true);
     if !brand.assets.iter().any(|x| x.filename == filename) {
       brand.assets.push(Asset { size, filename, role, idiom: "tv" });
     }
-    brand.child(filename)
+    brand.child(filename, true)
   }
 
   fn stack(&mut self, index: u8) -> &mut Self {
@@ -519,25 +523,32 @@ impl<'a> AssetContent<'a> {
       self.layers.push(AssetLayer { filename });
     }
 
-    self.child(filename).child("Content.imageset")
+    self.child(filename, true).child("Content.imageset", true)
   }
 
   fn image(&mut self, idiom: &'static str, p: &ParsedAsset<'a>) {
     self.images.push(AssetImage {
+      idiom,
       path:     p.path,
-      idiom:    "tv",
       filename: p.path.file_name().unwrap().to_str().unwrap().to_string(),
-      scale:    match p.size {
+      scale:    match p.scale {
         1 => "1x",
         2 => "2x",
+        3 => "3x",
         _ => unreachable!() // TODO better handling
       }
     });
   }
 }
 
-fn fold_asset_tvos<'a, 'b>(asset: &'b mut AssetContent<'a>, p: &ParsedAsset<'a>) where 'a: 'b {
+fn fold_asset<'a, 'b>(asset: &'b mut AssetContent<'a>, p: &ParsedAsset<'a>) where 'a: 'b {
   match p.name {
+    "icon" => {
+      asset.child("Icon.iconset", false).image("macos", p);
+    },
+    "AppIcon" => {
+      asset.child("AppIcon.appiconset", true).image("ios", p);
+    },
     "App Icon" => {
       asset.brand("400x240", "primary-app-icon", "App Icon.imagestack")
         .stack(p.layer)
@@ -583,46 +594,64 @@ fn fold_asset_tvos<'a, 'b>(asset: &'b mut AssetContent<'a>, p: &ParsedAsset<'a>)
 struct ParsedAsset<'a> {
   pub path:  &'a Path,
   pub name:  &'a str,
+  pub size:  &'a str,
   pub layer: u8,
-  pub size:  u8
+  pub scale: u8
 }
 
 fn parse_asset<'a>(path: &'a Path, s: &'a str) -> Option<ParsedAsset<'a>> {
   let x = s.as_bytes();
   let e = x.len();
-  if e < 10 || x[e-4] != b'.' { // A 1@1x.png
+  if e < 10 || x[e - 4] != b'.' { // A 1@1x.png
     return None
   }
 
   {
-    let ext = &x[e-3..];
+    let ext = &x[e - 3 ..];
     if ext != b"jpg" && ext != b"png" {
       return None;
     }
   }
 
-  if x[e-5] != b'x' || !x[e-6].is_ascii_digit() || x[e-7] != b'@' {
-    return None;
-  }
-
-  let size = x[e-6] - b'0';
-  let name;
-
-  let layer = if x[e-8].is_ascii_digit() && x[e-9] == b' ' {
-    name = from_utf8(&x[0..e-9]).unwrap();
-    x[e-8] - b'0'
+  // Parse the image scale (@1x, @2x, @3x)
+  let scale;
+  let offset = if x[e - 5] == b'x' && x[e - 6].is_ascii_digit() && x[e - 7] == b'@' {
+    scale = x[e - 6] - b'0';
+    e - 7
   }
   else {
-    name = from_utf8(&x[0..e-7]).unwrap();
+    scale = 1;
+    e - 4
+  };
+
+  // Parse the name and size
+  let name;
+  let size;
+  let layer = if x[offset - 1].is_ascii_digit() && x[offset - 2] == b' ' {
+    size = "";
+    name = from_utf8(&x[0 .. offset - 2]).unwrap();
+    x[offset - 1] - b'0'
+  }
+  else {
+    match x.iter().position(|&c| c == b'_') {
+      None => {
+        size = "";
+        name = from_utf8(&x[0 .. offset]).unwrap();
+      },
+      Some(pos) => {
+        size = from_utf8(&x[pos + 1 .. offset]).unwrap();
+        name = from_utf8(&x[0 .. pos]).unwrap();
+      }
+    }
     0
   };
 
-  Some(ParsedAsset { path, name, layer, size })
+  Some(ParsedAsset { path, name, size, layer, scale })
 }
 
 fn write_contents_json(root: &Path, path: &Path, content: &AssetContent) -> IO {
   create_dir_all(&path)?;
-  {
+  if content.write {
     let mut f = BufWriter::new(File::create(path.join("Contents.json"))?);
     serde_json::to_writer_pretty(&mut f, content)?;
     f.flush()?;
@@ -636,6 +665,7 @@ fn write_contents_json(root: &Path, path: &Path, content: &AssetContent) -> IO {
       remove_file(&target)?;
     }
 
+    // TODO copy on windows (TODO 2: should this generator run on windows?)
     std::os::unix::fs::symlink(src.join(image.path), &target)?;
   }
 
@@ -839,7 +869,8 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
                 name: "Assets.xcassets",
                 ..AssetContent::default()
               }, |mut assets, parsed| {
-                fold_asset_tvos(&mut assets, &parsed); // TODO generic platform
+                println!("{:?}", parsed);
+                fold_asset(&mut assets, &parsed); // TODO generic platform
                 assets
               });
 

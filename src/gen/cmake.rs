@@ -22,7 +22,7 @@ impl Generator for CMake {
       return Ok(());
     }
 
-    let input_rel = ctx.input_rel.join("..");
+    let input_rel   = ctx.input_rel.join("..");
     let mut sources = Vec::with_capacity(ctx.sources.len());
 
     let targets = ctx.project.targets.iter().enumerate().map(|(index, (name, target))| {
