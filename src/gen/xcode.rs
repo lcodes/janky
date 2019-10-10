@@ -79,12 +79,13 @@ use std::fs::{File, create_dir_all, remove_file};
 use std::io::{BufWriter, Write as IOWrite};
 use std::path::{Path, PathBuf};
 use std::str::from_utf8;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::ctx::{Context, Generator, PlatformType, RunResult, Target, TargetType};
 
 // TODO move to ctx for reuse
 #[derive(Debug)]
-struct StrError(pub String);
+struct StrError(String);
 
 impl std::fmt::Display for StrError {
   fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -132,7 +133,7 @@ impl Generator for XCode {
                                         name, "': ", from_utf8(&team_output.stderr)?].join(""))));
         }
 
-        let team = from_utf8(&team_output.stdout)?;
+        let team = from_utf8(&team_output.stdout)?.trim_end();
         if team.is_empty() {
           return Err(Box::new(StrError("Failed to get the provisioning profile".to_string())));
         }
@@ -152,27 +153,40 @@ impl Generator for XCode {
 
 type IO = std::io::Result<()>;
 
+static NEXT_ID_PREFIX: AtomicU32 = AtomicU32::new(0);
+
 fn random_id() -> String {
-  // TODO semi-random IDs, try and prevent xcode from reordering objects
   // TODO deterministic IDs? try and keep the same IDs between generator runs
   use rand::RngCore;
   let mut bytes: [u8; 12] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
-  rand::thread_rng().fill_bytes(&mut bytes);
+  rand::thread_rng().fill_bytes(&mut bytes[4..]);
+
+  // Use a counter as the first ID bytes to try and prevent Xcode from reordering objects.
+  let prefix = NEXT_ID_PREFIX.fetch_add(1, Ordering::Relaxed);
+  bytes[0] =  (prefix >> 24)         as u8;
+  bytes[1] = ((prefix >> 16) & 0xFF) as u8;
+  bytes[2] = ((prefix >> 8)  & 0xFF) as u8;
+  bytes[3] =  (prefix        & 0xFF) as u8;
 
   let mut id = String::with_capacity(24);
   for b in &bytes {
-    id.push(hex_char(b & 0xF));
     id.push(hex_char(b >> 4));
+    id.push(hex_char(b & 0xF));
   }
   id
 }
 
 fn hex_char(b: u8) -> char {
-  if b < 10 {
-    (b'0' + b) as char
+  match b < 10 {
+    true  => (b'0' + b)        as char,
+    false => (b'A' + (b - 10)) as char
   }
-  else {
-    (b'A' + (b - 10)) as char
+}
+
+fn quote(s: &str) -> Cow<'_, str> {
+  match s.is_empty() || s.contains(' ') {
+    true  => Cow::Owned(["\"", s, "\""].join("")),
+    false => Cow::Borrowed(s)
   }
 }
 
@@ -216,10 +230,14 @@ impl<'a> Group<'a> {
     Group {
       path,
       name,
-      id:       random_id(),
+      id:       String::new(),
       children: String::new(),
       groups:   Vec::new()
     }
+  }
+
+  fn is_empty(&self) -> bool {
+    self.children.is_empty() && self.groups.is_empty()
   }
 
   fn get_name(&self) -> &'_ str {
@@ -227,7 +245,7 @@ impl<'a> Group<'a> {
   }
 
   fn push(&mut self, id: &str, name: &str) {
-    write!(&mut self.children, "        {} /* {} */,\n", id, name).unwrap();
+    write!(&mut self.children, "\t\t\t\t{} /* {} */,\n", id, name).unwrap();
   }
 
   fn push_path(&mut self, id: &str, path: &'a Path) {
@@ -258,33 +276,41 @@ impl<'a> Group<'a> {
   }
 
   fn push_group(&mut self, child: Group<'a>) {
-    self.push(&child.id, child.get_name());
     self.groups.push(child);
   }
 
-  fn write<W>(&self, f: &mut W) -> IO where W: IOWrite {
-    write!(f, concat!("    {id} = {{\n",
-                      "      isa = PBXGroup;\n",
-                      "      children = (\n",
-                      "{children}",
-                      "      );\n"),
-           id       = self.id,
-           children = self.children)?;
+  fn write<W>(&mut self, f: &mut W) -> IO where W: IOWrite {
+    for g in &mut self.groups {
+      g.write(f)?;
+    }
+
+    self.id = random_id();
+
+    match self.path.or(self.name) {
+      None        => write!(f, "\t\t{} = {{\n",          self.id)?,
+      Some(ident) => write!(f, "\t\t{} /* {} */ = {{\n", self.id, ident)?
+    }
+
+    f.write(concat!("\t\t\tisa = PBXGroup;\n",
+                    "\t\t\tchildren = (\n").as_bytes())?;
+
+    for g in &self.groups {
+      write!(f, "\t\t\t\t{} /* {} */,\n", g.id, g.get_name())?;
+    }
+
+    f.write(self.children.as_bytes())?;
+    f.write("\t\t\t);\n".as_bytes())?;
 
     if let Some(x) = self.path {
-      write!(f, "      path = \"{}\";\n", x)?;
+      write!(f, "\t\t\tpath = {};\n", quote(x))?;
     }
 
     if let Some(x) = &self.name {
-      write!(f, "      name = \"{}\";\n", x)?;
+      write!(f, "\t\t\tname = {};\n", quote(x))?;
     }
 
-    write!(f, concat!("      sourceTree = \"<group>\";\n",
-                      "    }};\n"))?;
-
-    for g in &self.groups {
-      g.write(f)?;
-    }
+    f.write(concat!("\t\t\tsourceTree = \"<group>\";\n",
+                    "\t\t};\n").as_bytes())?;
 
     Ok(())
   }
@@ -304,18 +330,18 @@ impl CfgList {
   }
 
   fn push(&mut self, id: &str, name: &str) {
-    write!(&mut self.cfgs, "        {} /* {} */,\n", id, name).unwrap();
+    write!(&mut self.cfgs, "\t\t\t\t{} /* {} */,\n", id, name).unwrap();
   }
 
   fn write<W>(&self, f: &mut W, kind: &str, name: &str) -> IO where W: IOWrite {
-    write!(f, concat!("    {id} /* Build configuration list for {kind} \"{name}\" */ = {{\n",
-                      "      isa = XCConfigurationList;\n",
-                      "      buildConfigurations = (\n",
+    write!(f, concat!("\t\t{id} /* Build configuration list for {kind} \"{name}\" */ = {{\n",
+                      "\t\t\tisa = XCConfigurationList;\n",
+                      "\t\t\tbuildConfigurations = (\n",
                       "{cfgs}",
-                      "      );\n",
-                      "      defaultConfigurationIsVisible = 0;\n",
-                      "      defaultConfigurationName = Release;\n",
-                      "    }};\n"),
+                      "\t\t\t);\n",
+                      "\t\t\tdefaultConfigurationIsVisible = 0;\n",
+                      "\t\t\tdefaultConfigurationName = Release;\n",
+                      "\t\t}};\n"),
            id   = self.id,
            kind = kind,
            name = name,
@@ -328,8 +354,8 @@ fn build_file(phase: &mut String, files: &mut String, file_name: &str,
               ref_id: &str, phase_name: &str)
 {
   let id = random_id();
-  write!(phase, "        {} /* {} in {} */,\n", id, file_name, phase_name).unwrap();
-  write!(files, concat!("    {id} /* {name} in {phase} */ = {{",
+  write!(phase, "\t\t\t\t{} /* {} in {} */,\n", id, file_name, phase_name).unwrap();
+  write!(files, concat!("\t\t{id} /* {name} in {phase} */ = {{",
                         "isa = PBXBuildFile; ",
                         "fileRef = {refid} /* {name} */; }};\n"),
          id    = id,
@@ -339,16 +365,16 @@ fn build_file(phase: &mut String, files: &mut String, file_name: &str,
 }
 
 fn build_cfg<F>(cfg: &mut String, id: &str, name: &str, f: F) where F: FnOnce(&mut String) {
-  write!(cfg, concat!("    {} /* {} */ = {{\n",
-                      "      isa = XCBuildConfiguration;\n",
-                      "      buildSettings = {{\n"),
+  write!(cfg, concat!("\t\t{} /* {} */ = {{\n",
+                      "\t\t\tisa = XCBuildConfiguration;\n",
+                      "\t\t\tbuildSettings = {{\n"),
          id, name).unwrap();
 
   f(cfg);
 
-  write!(cfg, concat!("      }};\n",
-                      "      name = {};\n",
-                      "    }};\n"),
+  write!(cfg, concat!("\t\t\t}};\n",
+                      "\t\t\tname = {};\n",
+                      "\t\t}};\n"),
          name).unwrap();
 }
 
@@ -383,29 +409,29 @@ fn get_file_type(ext: &'_ str) -> (Phase, &'static str) {
 fn write_info_plist(path: &Path) -> IO {
   let mut f = File::create(path)?;
 
-  write!(f, concat!(r#"<?xml version="1.0" encoding="UTF-8"?>"#, "\n",
-                    r#"<!DOCTYPE plist PUBLIC "-//APPLE//DTD PLIST 1.0//EN" "#,
-                    r#""http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#, "\n",
-                    r#"<plist version="1.0">"#, "\n",
-                    "<dict>\n",
-                    "  <key>CFBundleDevelopmentRegion</key>\n",
-                    "  <string>${{DEVELOPMENT_LANGUAGE}}</string>\n",
-                    "  <key>CFBundleExecutable</key>\n",
-                    "  <string>${{EXECUTABLE_NAME}}</string>\n",
-                    "  <key>CFBundleIdentifier</key>\n",
-                    "  <string>${{PRODUCT_BUNDLE_IDENTIFIER}}</string>\n",
-                    "  <key>CFBundleInfoDictionaryVersion</key>\n",
-                    "  <string>6.0</string>\n",
-                    "  <key>CFBundleName</key>\n",
-                    "  <string>${{PRODUCT_NAME}}</string>\n",
-                    "  <key>CFBundlePackageType</key>\n",
-                    "  <string>${{PRODUCT_BUNDLE_PACKAGE_TYPE}}</string>\n",
-                    "  <key>CFBundleShortVersionString</key>\n",
-                    "  <string>1.0</string>\n",
-                    "  <key>CFBundleVersion</key>\n",
-                    "  <string>1</string>\n",
-                    "</dict>\n",
-                    "</plist>\n"))?;
+  f.write(concat!(r#"<?xml version="1.0" encoding="UTF-8"?>"#, "\n",
+                  r#"<!DOCTYPE plist PUBLIC "-//APPLE//DTD PLIST 1.0//EN" "#,
+                  r#""http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#, "\n",
+                  r#"<plist version="1.0">"#, "\n",
+                  "<dict>\n",
+                  "  <key>CFBundleDevelopmentRegion</key>\n",
+                  "  <string>${DEVELOPMENT_LANGUAGE}</string>\n",
+                  "  <key>CFBundleExecutable</key>\n",
+                  "  <string>${EXECUTABLE_NAME}</string>\n",
+                  "  <key>CFBundleIdentifier</key>\n",
+                  "  <string>${PRODUCT_BUNDLE_IDENTIFIER}</string>\n",
+                  "  <key>CFBundleInfoDictionaryVersion</key>\n",
+                  "  <string>6.0</string>\n",
+                  "  <key>CFBundleName</key>\n",
+                  "  <string>${PRODUCT_NAME}</string>\n",
+                  "  <key>CFBundlePackageType</key>\n",
+                  "  <string>${PRODUCT_BUNDLE_PACKAGE_TYPE}</string>\n",
+                  "  <key>CFBundleShortVersionString</key>\n",
+                  "  <string>1.0</string>\n",
+                  "  <key>CFBundleVersion</key>\n",
+                  "  <string>1</string>\n",
+                  "</dict>\n",
+                  "</plist>\n").as_bytes())?;
 
   f.flush()?;
   Ok(())
@@ -413,8 +439,8 @@ fn write_info_plist(path: &Path) -> IO {
 
 #[derive(Serialize)]
 struct AssetInfo {
-  pub version: u32,
-  pub author:  &'static str
+  version: u32,
+  author:  &'static str
 }
 
 impl AssetInfo {
@@ -428,51 +454,55 @@ impl AssetInfo {
 
 #[derive(Serialize)]
 struct Asset {
-  pub size:     &'static str,
-  pub idiom:    &'static str,
-  pub filename: &'static str,
-  pub role:     &'static str
+  size:     &'static str,
+  idiom:    &'static str,
+  filename: &'static str,
+  role:     &'static str
 }
 
 #[derive(Serialize)]
 struct AssetLayer {
-  pub filename: &'static str
+  filename: &'static str
+}
+
+fn str_is_empty(s: &str) -> bool {
+  s.is_empty()
 }
 
 #[derive(Serialize)]
 struct AssetImage<'a> {
-  pub idiom:    &'static str,
-  pub filename: String,
-  pub scale:    &'static str,
+  #[serde(skip_serializing_if = "str_is_empty")]
+  size: &'a str,
+
+  idiom:    &'a str,
+  filename: String,
+  scale:    &'static str,
 
   #[serde(skip)]
-  pub path: &'a Path
+  path: &'a Path
 }
 
 #[derive(Serialize)]
 struct AssetContent<'a> {
   #[serde(skip_serializing_if = "Vec::is_empty")]
-  pub assets: Vec<Asset>,
+  assets: Vec<Asset>,
 
   #[serde(skip_serializing_if = "Vec::is_empty")]
-  pub layers: Vec<AssetLayer>,
+  layers: Vec<AssetLayer>,
 
   #[serde(skip_serializing_if = "Vec::is_empty")]
-  pub images: Vec<AssetImage<'a>>,
+  images: Vec<AssetImage<'a>>,
 
-  pub info: AssetInfo,
-
-  #[serde(skip)]
-  pub write: bool,
+  info: AssetInfo,
 
   #[serde(skip)]
-  pub name: &'a str,
+  name: &'a str,
 
   #[serde(skip)]
-  pub layer: u8,
+  layer: u8,
 
   #[serde(skip)]
-  pub children: Vec<AssetContent<'a>>
+  children: Vec<AssetContent<'a>>
 }
 
 impl Default for AssetContent<'_> {
@@ -483,7 +513,6 @@ impl Default for AssetContent<'_> {
       images:   Vec::new(),
       children: Vec::new(),
       info:     AssetInfo::new(),
-      write:    true,
       name:     "",
       layer:    0
     }
@@ -491,22 +520,22 @@ impl Default for AssetContent<'_> {
 }
 
 impl<'a> AssetContent<'a> {
-  fn child(&mut self, name: &'a str, write: bool) -> &mut Self {
+  fn child(&mut self, name: &'a str) -> &mut Self {
     match self.children.iter().position(|x| x.name == name) {
       Some(i) => &mut self.children[i],
       None    => {
-        self.children.push(AssetContent { name, write, ..AssetContent::default() });
+        self.children.push(AssetContent { name, ..AssetContent::default() });
         self.children.last_mut().unwrap()
       }
     }
   }
 
   fn brand(&mut self, size: &'static str, role: &'static str, filename: &'static str) -> &mut Self {
-    let mut brand = self.child("App Icon & Top Shelf Image.brandassets", true);
+    let mut brand = self.child("App Icon & Top Shelf Image.brandassets");
     if !brand.assets.iter().any(|x| x.filename == filename) {
       brand.assets.push(Asset { size, filename, role, idiom: "tv" });
     }
-    brand.child(filename, true)
+    brand.child(filename)
   }
 
   fn stack(&mut self, index: u8) -> &mut Self {
@@ -523,12 +552,13 @@ impl<'a> AssetContent<'a> {
       self.layers.push(AssetLayer { filename });
     }
 
-    self.child(filename, true).child("Content.imageset", true)
+    self.child(filename).child("Content.imageset")
   }
 
-  fn image(&mut self, idiom: &'static str, p: &ParsedAsset<'a>) {
+  fn image(&mut self, idiom: &'a str, p: &ParsedAsset<'a>) {
     self.images.push(AssetImage {
       idiom,
+      size:     p.size,
       path:     p.path,
       filename: p.path.file_name().unwrap().to_str().unwrap().to_string(),
       scale:    match p.scale {
@@ -542,12 +572,13 @@ impl<'a> AssetContent<'a> {
 }
 
 fn fold_asset<'a, 'b>(asset: &'b mut AssetContent<'a>, p: &ParsedAsset<'a>) where 'a: 'b {
+  // TODO reuse "App Icon", handle by platform
   match p.name {
     "icon" => {
-      asset.child("Icon.iconset", false).image("macos", p);
+      asset.child("AppIcon.appiconset").image("mac", p);
     },
     "AppIcon" => {
-      asset.child("AppIcon.appiconset", true).image("ios", p);
+      asset.child("AppIcon.appiconset").image(p.idiom, p);
     },
     "App Icon" => {
       asset.brand("400x240", "primary-app-icon", "App Icon.imagestack")
@@ -574,31 +605,58 @@ fn fold_asset<'a, 'b>(asset: &'b mut AssetContent<'a>, p: &ParsedAsset<'a>) wher
   }
 }
 
-// macOS Assets.xcassets
-// - ???.iconset
-
-// iOS & watchOS Assets.xcassets
-// - ???.appiconset
-
-// tvOS Assets.xcassets (TODO generate HEIF files?)
-// - App Icon & Top Shelf Image.brandassets [assets]
-//   - Top Shelf Image Wide.imageset [images]
-//   - App Icon - App Store.imagestack [layers]
-//     - <layer>.imagestacklayer
-//       - Content.imageset [images]
-//   - App Icon.imagestack [layers]
-//     - <layer>.imagestacklayer
-//       - Content.imageset [images]
-
 #[derive(Debug)]
 struct ParsedAsset<'a> {
-  pub path:  &'a Path,
-  pub name:  &'a str,
-  pub size:  &'a str,
-  pub layer: u8,
-  pub scale: u8
+  path:  &'a Path,
+  name:  &'a str,
+  size:  &'a str,
+  idiom: &'a str,
+  layer: u8,
+  scale: u8
 }
 
+/// Parses information about an image asset from its filename. Note that very little
+/// validation is performed here, instead delegating it to Xcode itself.
+///
+/// Supports all icons up to version 13.0 for macOS, iOS iphone/ipad, tvOS and watchOS.
+///
+/// macOS images:
+/// - icon_[size].png
+/// - icon_[size]@[scale].png
+///
+/// [size] is one of '16x16', '32x32', '128x128', '256x256' or '512x512'.
+/// [scale] has to be '2x' or left out of the filename for '1x' images.
+///
+/// iOS images:
+/// - [name]_[size]@[scale].png
+/// - [name]_[idiom]_[size]@[scale].png
+///
+/// [name] is one of 'AppIcon' or 'LaunchImage'.
+/// [idiom] is one of 'iphone', 'ipad' or unspecified for 'ios-marketing'.
+/// [size] varies depending on the idiom:
+/// - for iphone icons: one of '20x20', '29x29', '40x40', '60x60'.
+/// - for ipad icons  : one of '20x20', '29x29', '40x40', '76x76', '83.5x83.5'.
+/// [scale] is one of '2x' or '3x' for iphone icons, ipad also needs '1x'.
+///
+/// tvOS images:
+/// - [name]@[scale].png
+/// - [name] [layer]@[scale].png
+///
+/// [scale] is one of '1x' or '2x'.
+///
+/// [name] is one of:
+/// - 'App Icon'
+/// - 'App Icon - App Store'
+/// - 'Top Shelf Image'
+/// - 'Top Shelf Image Wide'
+/// - 'Launch Image'
+///
+/// Note that image sizes are not part of the filename as they are inferred from the name.
+///
+/// watchOS images:
+/// TODO
+///
+/// TODO ios launch images (orientation, idiom, extent, scale, minimum-system-version, subtype)
 fn parse_asset<'a>(path: &'a Path, s: &'a str) -> Option<ParsedAsset<'a>> {
   let x = s.as_bytes();
   let e = x.len();
@@ -613,7 +671,7 @@ fn parse_asset<'a>(path: &'a Path, s: &'a str) -> Option<ParsedAsset<'a>> {
     }
   }
 
-  // Parse the image scale (@1x, @2x, @3x)
+  // Parse the image scale (@1x, @2x, @3x).
   let scale;
   let offset = if x[e - 5] == b'x' && x[e - 6].is_ascii_digit() && x[e - 7] == b'@' {
     scale = x[e - 6] - b'0';
@@ -624,38 +682,51 @@ fn parse_asset<'a>(path: &'a Path, s: &'a str) -> Option<ParsedAsset<'a>> {
     e - 4
   };
 
-  // Parse the name and size
+  // Parse the name, size, idiom and layer.
   let name;
   let size;
+  let idiom;
   let layer = if x[offset - 1].is_ascii_digit() && x[offset - 2] == b' ' {
-    size = "";
-    name = from_utf8(&x[0 .. offset - 2]).unwrap();
+    idiom = "";
+    size  = "";
+    name  = from_utf8(&x[0 .. offset - 2]).unwrap();
     x[offset - 1] - b'0'
   }
   else {
-    match x.iter().position(|&c| c == b'_') {
+    match x[0 .. offset].iter().position(|&c| c == b'_') {
       None => {
-        size = "";
-        name = from_utf8(&x[0 .. offset]).unwrap();
+        idiom = "";
+        size  = "";
+        name  = from_utf8(&x[0 .. offset]).unwrap();
       },
       Some(pos) => {
-        size = from_utf8(&x[pos + 1 .. offset]).unwrap();
+        let size_pos = match x[pos + 1 .. offset].iter().position(|&c| c == b'_') {
+          None => {
+            idiom = "ios-marketing";
+            pos
+          },
+          Some(sliced_pos) => {
+            let idiom_pos = pos + sliced_pos + 1;
+            idiom = from_utf8(&x[pos + 1 .. idiom_pos]).unwrap();
+            idiom_pos
+          }
+        };
+        size = from_utf8(&x[size_pos + 1 .. offset]).unwrap();
         name = from_utf8(&x[0 .. pos]).unwrap();
       }
     }
     0
   };
 
-  Some(ParsedAsset { path, name, size, layer, scale })
+  Some(ParsedAsset { path, name, size, idiom, layer, scale })
 }
 
 fn write_contents_json(root: &Path, path: &Path, content: &AssetContent) -> IO {
   create_dir_all(&path)?;
-  if content.write {
-    let mut f = BufWriter::new(File::create(path.join("Contents.json"))?);
-    serde_json::to_writer_pretty(&mut f, content)?;
-    f.flush()?;
-  }
+
+  let mut f = BufWriter::new(File::create(path.join("Contents.json"))?);
+  serde_json::to_writer_pretty(&mut f, content)?;
+  f.flush()?;
 
   let src = pathdiff::diff_paths(&root, &path).unwrap();
 
@@ -676,38 +747,55 @@ fn write_contents_json(root: &Path, path: &Path, content: &AssetContent) -> IO {
   Ok(())
 }
 
-fn write_file_ref(s: &mut String, id: &str, name: &str, path: Option<&Path>, pbx_type: &str) {
-  write!(s, concat!("    {id} /* {name} */ = {{",
+const GROUP_REF: &str = "\"<group>\"";
+
+fn write_file_ref(s: &mut String, id: &str, name: &str, path: Option<&Path>,
+                  pbx_type: &str, source: &str)
+{
+  write!(s, concat!("\t\t{id} /* {name} */ = {{",
                     "isa = PBXFileReference; ",
-                    "lastKnownFileType = {file}; ",
-                    "name = \"{name}\"; "),
+                    "lastKnownFileType = {file}; "),
          id   = id,
          name = name,
          file = pbx_type).unwrap();
 
   if let Some(p) = path {
-    write!(s, "path = {:?}; ", p).unwrap();
+    write!(s, "name = {}; path = {}; ", quote(name), quote(p.to_str().unwrap())).unwrap();
+  }
+  else {
+    write!(s, "path = {}; ", quote(name)).unwrap();
   }
 
-  write!(s, "sourceTree = \"<group>\"; }};\n").unwrap();
+  write!(s, "sourceTree = {}; }};\n", source).unwrap();
 }
 
 fn write_build_phase(s: &mut String, id: &str, phase: &str) {
-  write!(s, concat!("    {id} /* {phase} */ = {{\n",
-                               "      isa = PBX{phase}BuildPhase;\n",
-                               "      buildActionMask = 2147483647;\n",
-                               "      files = (\n"),
+  write!(s, concat!("\t\t{id} /* {phase} */ = {{\n",
+                    "\t\t\tisa = PBX{phase}BuildPhase;\n",
+                    "\t\t\tbuildActionMask = 2147483647;\n",
+                    "\t\t\tfiles = (\n"),
          id    = id,
          phase = phase).unwrap();
 
 }
 
 fn pretty_name(prettify: bool, name: &str, platform: PlatformType) -> Cow<'_, str> {
-  if prettify {
-    Cow::Owned([name, " (", platform.to_str(), ")"].join(""))
+  match prettify {
+    true  => Cow::Owned([name, " (", platform.to_str(), ")"].join("")),
+    false => Cow::from(name)
   }
-  else {
-    Cow::from(name)
+}
+
+fn sdk_info(p: PlatformType) -> (&'static str, &'static str) {
+  match p {
+    PlatformType::MacOS   => ("SDKROOT", ""),
+    PlatformType::IOS     => ("DEVELOPER_DIR",
+                              "Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS13.0.sdk/"),
+    PlatformType::TVOS    => ("DEVELOPER_DIR",
+                              "Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS13.0.sdk/"),
+    PlatformType::WatchOS => ("DEVELOPER_DIR",
+                              "Platforms/WatchOS.platform/Developer/SDKs/WatchOS13.0.sdk/"),
+    _                     => unreachable!()
   }
 }
 
@@ -716,18 +804,19 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   let mut f = BufWriter::new(File::create(path)?);
 
   // Prepare to collect all the required data to generate the PBX objects.
-  let     project_id    = random_id();
-  let mut project_cfgs  = CfgList::new();
-  let mut cfgs          = String::new();
-  let mut files         = String::new();
-  let mut refs          = String::new();
-  let mut sources       = String::new();
-  let mut resources     = String::new();
-  let mut frameworks    = String::new();
-  let mut main_group    = Group::new(None, None);
-  let mut shared_group  = Group::new(Some("Shared"), None);
-  let mut product_group = Group::new(Some("Products"), None);
-  let mut targets       = Vec::with_capacity(ctx.project.targets.len());
+  let     project_id       = random_id();
+  let mut project_cfgs     = CfgList::new();
+  let mut cfgs             = String::new();
+  let mut files            = String::new();
+  let mut refs             = String::new();
+  let mut sources          = String::new();
+  let mut frameworks       = String::new();
+  let mut resources        = String::new();
+  let mut main_group       = Group::new(None, None);
+  let mut shared_group     = Group::new(Some("Shared"), None);
+  let mut product_group    = Group::new(Some("Products"), None);
+  let mut frameworks_group = Group::new(Some("Frameworks"), None);
+  let mut targets          = Vec::with_capacity(ctx.project.targets.len());
 
   for _ in 0..targets.capacity() {
     targets.push([None, None, None, None]);
@@ -736,11 +825,9 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   // Collect information about files from every target.
   // At the same time, generate the shared group and file references.
   let file_stats = {
-    let group = if ctx.project.info.xcode.group_by_target {
-      &mut shared_group
-    }
-    else {
-      &mut main_group
+    let group = match ctx.project.info.xcode.group_by_target {
+      true  => &mut shared_group,
+      false => &mut main_group
     };
 
     ctx.sources.iter().flatten()
@@ -757,7 +844,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
           .or_insert_with(|| {
             let id = random_id();
             let (phase, pbx_type) = get_file_type(info.extension());
-            write_file_ref(&mut refs, &id, info.name(), None, pbx_type);
+            write_file_ref(&mut refs, &id, info.name(), None, pbx_type, GROUP_REF);
             FileStats { id, phase, pbx_type, num_targets: 1 }
           });
         m
@@ -780,10 +867,10 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
     let id = random_id();
     build_cfg(&mut cfgs, &id, prof, |s| {
-      write!(s, concat!("        ALWAYS_SEARCH_USER_PATHS = NO;\n")).unwrap();
+      s.push_str("\t\t\t\tALWAYS_SEARCH_USER_PATHS = NO;\n");
 
-      write!(s, concat!("        CLANG_CXX_LANGUAGE_STANDARD = \"c++17\";\n",
-                        "        GCC_C_LANGUAGE_STANDARD = c11;\n")).unwrap();
+      write!(s, concat!("\t\t\t\tCLANG_CXX_LANGUAGE_STANDARD = \"c++17\";\n",
+                        "\t\t\t\tGCC_C_LANGUAGE_STANDARD = c11;\n")).unwrap();
     });
     project_cfgs.push(&id, prof);
     // profiles.clear();
@@ -802,11 +889,9 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
     let data = &mut targets[target_index];
 
     let mut target_group = Group::new(Some(target_name), None);
-    let group = if ctx.project.info.xcode.group_by_target {
-      &mut target_group
-    }
-    else {
-      &mut main_group
+    let group = match ctx.project.info.xcode.group_by_target {
+      true  => &mut target_group,
+      false => &mut main_group
     };
 
     for file_info in target_files {
@@ -820,19 +905,41 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
     for (platform_index, platform) in platforms {
       let mut cfg_list       = CfgList::new();
       let mut build_phases   = String::new();
-      let mut build_settings = String::new();
+
+      let settings_info_plist;
+      let settings_app_icon;
 
       // Initialize the target's build phases.
       {
-        let sources_id   = random_id();
-        let resources_id = random_id(); // TODO frameworks too?
+        let sources_id    = random_id();
+        let frameworks_id = random_id();
+        let resources_id  = random_id();
 
-        write_build_phase(&mut sources,   &sources_id, "Sources");
-        write_build_phase(&mut resources, &resources_id, "Resources");
+        write_build_phase(&mut sources,    &sources_id,    "Sources");
+        write_build_phase(&mut frameworks, &frameworks_id, "Frameworks");
+        write_build_phase(&mut resources,  &resources_id,  "Resources");
 
-        write!(&mut build_phases, concat!("        {} /* Sources */,\n",
-                                          "        {} /* Resources */,\n"),
-               sources_id, resources_id).unwrap();
+        write!(&mut build_phases, concat!("\t\t\t\t{} /* Sources */,\n",
+                                          "\t\t\t\t{} /* Frameworks */,\n",
+                                          "\t\t\t\t{} /* Resources */,\n"),
+               sources_id, frameworks_id, resources_id).unwrap();
+      }
+
+      // Link frameworks
+      let (sdk_source, sdk_prefix) = sdk_info(platform);
+      let link_frameworks = match platform { // TODO dont hardcode
+        PlatformType::WatchOS => &[] as &[&str],
+        PlatformType::MacOS   => &["AppKit", "Metal"],
+        _                     => &["UIKit", "Metal"]
+      };
+
+      for lf in link_frameworks {
+        let ref_id = random_id();
+        let name = [lf, ".framework"].join("");
+        let path = PathBuf::from([sdk_prefix, "System/Library/Frameworks/", &name].join(""));
+        frameworks_group.push(&ref_id, &name);
+        build_file(&mut frameworks, &mut files, &name, &ref_id, "Frameworks");
+        write_file_ref(&mut refs, &ref_id, &name, Some(&path), "wrapper.framework", sdk_source);
       }
 
       // Generate application assets.
@@ -847,10 +954,12 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
         let plist_name   = pretty_name(has_multiple_platforms, "Info.plist", platform);
         let plist_ref    = ctx.build_rel.join(plist);
         let plist_ref_id = random_id();
-        write_file_ref(&mut refs, &plist_ref_id, &plist_name, Some(&plist_ref), "text.plist.xml");
         group.push(&plist_ref_id, &plist_name);
+        write_file_ref(&mut refs, &plist_ref_id, &plist_name, Some(&plist_ref),
+                       "text.plist.xml", GROUP_REF);
 
-        write!(&mut build_settings, "        INFOPLIST_FILE = {:?};\n", plist_ref).unwrap();
+        settings_info_plist = format!("\t\t\t\tINFOPLIST_FILE = {};\n",
+                                      quote(plist_ref.to_str().unwrap()));
 
         if let Some(dir) = target.assets {
           let platform_pattern = match platform {
@@ -860,54 +969,63 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
             PlatformType::WatchOS => "/watchos/",
             _                     => unreachable!()
           };
+          let assets_name    = pretty_name(has_multiple_platforms, "Assets.xcassets", platform);
           let assets_pattern = [dir, platform_pattern].join("");
           let assets = ctx.assets[target_index].iter()
-              .filter(|info| info.meta.is_file() && info.to_str().starts_with(&assets_pattern))
-              .map   (|info| parse_asset(&info.path, &info.to_str()[assets_pattern.len()..]))
-              .flatten()
-              .fold(AssetContent {
-                name: "Assets.xcassets",
-                ..AssetContent::default()
-              }, |mut assets, parsed| {
-                println!("{:?}", parsed);
-                fold_asset(&mut assets, &parsed); // TODO generic platform
-                assets
-              });
+            .filter(|info| info.meta.is_file() && info.to_str().starts_with(&assets_pattern))
+            .map   (|info| parse_asset(&info.path, &info.to_str()[assets_pattern.len()..]))
+            .flatten()
+            .fold(AssetContent {
+              name: &assets_name,
+              ..AssetContent::default()
+            }, |mut assets, parsed| {
+              fold_asset(&mut assets, &parsed); // TODO generic platform
+              assets
+            });
 
-          let assets_path = gen_dir.join(assets.name);
+          let assets_path = gen_dir.join("Assets.xcassets");
           write_contents_json(&ctx.input_dir, &ctx.build_dir.join(&assets_path), &assets)?;
 
-          let assets_name   = pretty_name(has_multiple_platforms, assets.name, platform);
           let assets_ref    = ctx.build_rel.join(assets_path);
           let assets_ref_id = random_id();
-          build_file(&mut resources, &mut files, &assets_name, &assets_ref_id, "Resources");
-          write_file_ref(&mut refs, &assets_ref_id, &assets_name, Some(&assets_ref), "folder.assetcatalog");
           group.push(&assets_ref_id, assets.name);
+          build_file(&mut resources, &mut files, &assets_name, &assets_ref_id, "Resources");
+          write_file_ref(&mut refs, &assets_ref_id, &assets_name, Some(&assets_ref),
+                         "folder.assetcatalog", GROUP_REF);
 
-          write!(&mut build_settings, "        ASSETCATALOG_COMPILER_APPICON_NAME = \"{}\";\n",
-                 match platform {
-                   PlatformType::MacOS   |
-                   PlatformType::IOS     |
-                   PlatformType::WatchOS => "App Icon",
-                   PlatformType::TVOS    => "App Icon & Top Shelf Image",
-                   _                     => unreachable!()
-                 }).unwrap();
+          settings_app_icon = format!("\t\t\t\tASSETCATALOG_COMPILER_APPICON_NAME = {};\n",
+                                      match platform {
+                                        PlatformType::MacOS   |
+                                        PlatformType::IOS     |
+                                        PlatformType::WatchOS => "AppIcon",
+                                        PlatformType::TVOS    => "\"App Icon & Top Shelf Image\"",
+                                        _                     => unreachable!()
+                                      });
         }
+        else {
+          settings_app_icon = String::new();
+        }
+      }
+      else {
+        settings_info_plist = String::new();
+        settings_app_icon   = String::new();
       }
 
       // Generate the build configurations for this target.
       for prof in &ctx.profiles {
         let id = random_id();
         build_cfg(&mut cfgs, &id, prof, |s| {
-          if let Some(id) = team {
-            write!(s, "        DEVELOPMENT_TEAM = {};\n", id).unwrap();
-          }
-
-          write!(s, "{}", build_settings).unwrap();
+          s.push_str(&settings_app_icon);
 
           if target.target_type == TargetType::Application {
-            write!(s, concat!("        CODE_SIGN_STYLE = Automatic;\n")).unwrap();
+            s.push_str("\t\t\t\tCODE_SIGN_STYLE = Automatic;\n");
           }
+
+          if let Some(id) = team {
+            write!(s, "\t\t\t\tDEVELOPMENT_TEAM = {};\n", id).unwrap();
+          }
+
+          s.push_str(&settings_info_plist);
 
           // TODO libraries
           // DYLIB_COMPATIBILITY_VERSION = 1;
@@ -933,32 +1051,65 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
           // VERSIONING_SYSTEM = "apple-generic";
           // VERSION_INFO_PREFIX = "";
 
-          write!(s, concat!("        PRODUCT_NAME = \"{}\";\n",
-                            "        PRODUCT_BUNDLE_IDENTIFIER = com.lambdacoder.Jank;\n"),
-                 target_name).unwrap();
+          let sdk;
+          let family;
+          let sdk_version;
 
-          match platform {
+          match platform { // TODO target version
             PlatformType::MacOS => {
               // TODO COMBINE_HIDPI_IMAGES = YES;
-              write!(s, "        MACOSX_DEPLOYMENT_TARGET = 10.14;\n").unwrap();
-              write!(s, "        SDKROOT = macosx;\n").unwrap();
+              sdk    = "macosx";
+              family = "";
+              sdk_version = "\t\t\t\tMACOSX_DEPLOYMENT_TARGET = 10.14;\n";
             },
             PlatformType::IOS => {
-              write!(s, "        IPHONEOS_DEPLOYMENT_TARGET = 13.0;\n").unwrap();
-              write!(s, "        SDKROOT = iphoneos;\n").unwrap();
-              write!(s, "        TARGETED_DEVICE_FAMILY = \"1,2\";\n").unwrap(); // TODO iphone vs ipad
+              sdk    = "iphoneos";
+              family = "\"1,2\""; // TODO iphone vs ipad
+              sdk_version = "\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 13.0;\n";
             },
             PlatformType::TVOS => {
-              write!(s, "        IPHONEOS_DEPLOYMENT_TARGET = 13.0;\n").unwrap();
-              write!(s, "        SDKROOT = appletvos;\n").unwrap();
-              write!(s, "        TARGETED_DEVICE_FAMILY = 3;\n").unwrap();
+              sdk    = "appletvos";
+              family = "3";
+              sdk_version = "\t\t\t\tTVOS_DEPLOYMENT_TARGET = 13.0;\n";
             },
             PlatformType::WatchOS => {
-              write!(s, "        IPHONEOS_DEPLOYMENT_TARGET = 13.0;\n").unwrap();
-              write!(s, "        SDKROOT = watchos;\n").unwrap();
-              write!(s, "        TARGETED_DEVICE_FAMILY = 4;\n").unwrap();
+              sdk    = "watchos";
+              family = "4";
+              sdk_version = "\t\t\t\tWATCHOS_DEPLOYMENT_TARGET = 6.0;\n";
             },
             _ => unreachable!(),
+          }
+
+          if platform == PlatformType::IOS {
+            s.push_str(sdk_version);
+          }
+
+          s.push_str(concat!("\t\t\t\tLD_RUNPATH_SEARCH_PATHS = (\n",
+                             "\t\t\t\t\t\"$(inherited)\",\n",
+                             "\t\t\t\t\t\"@executable_path/Frameworks\",\n"));
+
+          if platform != PlatformType::MacOS {
+            s.push_str("\t\t\t\t\t\"@loader_path/Frameworks\",\n");
+          }
+
+          s.push_str("\t\t\t\t);\n");
+
+          if platform == PlatformType::MacOS {
+            s.push_str(sdk_version);
+          }
+
+          write!(s, concat!("\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.lambdacoder.Jank;\n",
+                            "\t\t\t\tPRODUCT_NAME = {};\n"),
+                 quote(target_name)).unwrap();
+
+          write!(s, "\t\t\t\tSDKROOT = {};\n", sdk).unwrap();
+
+          if !family.is_empty() {
+            write!(s, "\t\t\t\tTARGETED_DEVICE_FAMILY = {};\n", family).unwrap();
+          }
+
+          if platform == PlatformType::TVOS || platform == PlatformType::WatchOS {
+            s.push_str(sdk_version);
           }
 
           // TODO compiler
@@ -1013,25 +1164,27 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
       }
 
       // Finalize the target's build phase objects.
-      const BUILD_PHASE_END: &str = concat!("      );\n",
-                                            "      runOnlyForDeploymentPostprocessing = 0;\n",
-                                            "    };\n");
+      const BUILD_PHASE_END: &str = concat!("\t\t\t);\n",
+                                            "\t\t\trunOnlyForDeploymentPostprocessing = 0;\n",
+                                            "\t\t};\n");
       sources.push_str(BUILD_PHASE_END);
+      frameworks.push_str(BUILD_PHASE_END);
       resources.push_str(BUILD_PHASE_END);
 
       // Generate the target's product.
       let product_id   = random_id();
       let product_name = pretty_name(has_multiple_platforms, target_name, platform);
       let target_ext   = get_target_ext(target.target_type);
-      write!(&mut refs, concat!("    {product_id} /* {target_name}{target_ext} */ = {{",
+      write!(&mut refs, concat!("\t\t{product_id} /* {comment_name} */ = {{",
                                 "isa = PBXFileReference; ",
                                 "explicitFileType = {target_type}; ",
                                 "includeInIndex = 0; ",
-                                "name = \"{product_name}\"; ",
-                                "path = \"{target_name}{target_ext}\"; ",
+                                "name = {product_name}; ",
+                                "path = {target_name}{target_ext}; ", // TODO quote over ext
                                 "sourceTree = BUILT_PRODUCTS_DIR; }};\n"),
              product_id   = product_id,
-             product_name = product_name,
+             product_name = quote(&product_name),
+             comment_name = &product_name,
              target_name  = target_name,
              target_ext   = target_ext,
              target_type  = match target.target_type {
@@ -1047,8 +1200,8 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
                // "text"
              }).unwrap();
 
-      write!(&mut product_group.children, "        {} /* {}{} */,\n",
-             product_id, target_name, target_ext).unwrap();
+      write!(&mut product_group.children, "\t\t\t\t{} /* {} */,\n",
+             product_id, product_name).unwrap();
 
       // Finalize this target.
       data[platform_index] = Some(TargetData {
@@ -1062,13 +1215,17 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
       });
     }
 
-    if ctx.project.info.xcode.group_by_target {
+    if ctx.project.info.xcode.group_by_target && !target_group.is_empty() {
       main_group.push_group(target_group);
     }
   }
 
-  if ctx.project.info.xcode.group_by_target {
+  if ctx.project.info.xcode.group_by_target && !shared_group.is_empty() {
     main_group.push_group(shared_group);
+  }
+
+  if !frameworks_group.is_empty() {
+    main_group.push_group(frameworks_group);
   }
 
   main_group.push_group(product_group);
@@ -1076,11 +1233,11 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   // Finally, generate the project file.
   write!(f, concat!("// !$*UTF8*$!\n",
                     "{{\n",
-                    "  archiveVersion = 1;\n",
-                    "  classes = {{\n",
-                    "  }};\n",
-                    "  objectVersion = 50;\n",
-                    "  objects = {{\n",
+                    "\tarchiveVersion = 1;\n",
+                    "\tclasses = {{\n",
+                    "\t}};\n",
+                    "\tobjectVersion = 50;\n",
+                    "\tobjects = {{\n",
                     "\n",
                     "/* Begin PBXBuildFile section */\n",
                     "{files}",
@@ -1101,32 +1258,31 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
   main_group.write(&mut f)?;
 
-  write!(f, concat!("/* End PBXGroup section */\n",
-                    "\n",
-                    "/* Begin PBXNativeTarget section */\n"))?;
+  f.write(concat!("/* End PBXGroup section */\n",
+                  "\n",
+                  "/* Begin PBXNativeTarget section */\n").as_bytes())?;
 
   for data in targets.iter().flatten().flatten() {
-    write!(f, concat!("    {target_id} /* {product_name} */ = {{\n",
-                      "      isa = PBXNativeTarget;\n",
-                      "      buildConfigurationList = {cfg_list_id} /* ",
-                      "Build configuration list for PBXNativeTarget \"{product_name}\" */;\n",
-                      "      buildPhases = (\n",
+    write!(f, concat!("\t\t{target_id} /* {comment_name} */ = {{\n",
+                      "\t\t\tisa = PBXNativeTarget;\n",
+                      "\t\t\tbuildConfigurationList = {cfg_list_id} /* ",
+                      "Build configuration list for PBXNativeTarget \"{comment_name}\" */;\n",
+                      "\t\t\tbuildPhases = (\n",
                       "{build_phases}",
-                      "      );\n",
-                      "      buildRules = (\n",
-                      "      );\n",
-                      "      dependencies = (\n",
-                      "      );\n",
-                      "      name = \"{product_name}\";\n",
-                      "      productName = \"{product_name}\";\n",
-                      "      productReference = {product_id} /* {target_name}{target_ext} */;\n",
-                      "      productType = \"com.apple.product-type.{product_type}\";\n",
-                      "    }};\n"),
+                      "\t\t\t);\n",
+                      "\t\t\tbuildRules = (\n",
+                      "\t\t\t);\n",
+                      "\t\t\tdependencies = (\n",
+                      "\t\t\t);\n",
+                      "\t\t\tname = {product_name};\n",
+                      "\t\t\tproductName = {product_name};\n",
+                      "\t\t\tproductReference = {product_id} /* {comment_name} */;\n",
+                      "\t\t\tproductType = \"com.apple.product-type.{product_type}\";\n",
+                      "\t\t}};\n"),
            target_id    = data.target_id,
-           target_name  = data.target_name,
-           target_ext   = get_target_ext(data.target.target_type),
            product_id   = data.product_id,
-           product_name = &data.product_name,
+           product_name = quote(&data.product_name),
+           comment_name = &data.product_name,
            cfg_list_id  = data.cfg_list.id,
            build_phases = data.build_phases,
            product_type = match data.target.target_type {
@@ -1143,55 +1299,55 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   write!(f, concat!("/* End PBXNativeTarget section */\n",
                     "\n",
                     "/* Begin PBXProject section */\n",
-                    "    {project_id} /* Project object */ = {{\n",
-                    "      isa = PBXProject;\n",
-                    "      attributes = {{\n",
-                    "        BuildIndependentTargetsInParallel = YES;\n",
-                    "        LastUpgradeCheck = 1100;\n",
-                    "        ORGANIZATIONNAME = \"{organization}\";\n",
-                    "        TargetAttributes = {{\n"),
+                    "\t\t{project_id} /* Project object */ = {{\n",
+                    "\t\t\tisa = PBXProject;\n",
+                    "\t\t\tattributes = {{\n",
+                    "\t\t\t\tBuildIndependentTargetsInParallel = YES;\n",
+                    "\t\t\t\tLastUpgradeCheck = 1100;\n",
+                    "\t\t\t\tORGANIZATIONNAME = {organization};\n",
+                    "\t\t\t\tTargetAttributes = {{\n"),
          project_id   = project_id,
-         organization = "com.lambdacoder")?;
+         organization = quote("com.lambdacoder"))?;
 
   for data in targets.iter().flatten().flatten() {
-    write!(f, concat!("          {target_id} = {{\n",
-                      "            CreatedOnToolsVersion = 11.0;\n",
-                      "          }};\n"),
+    write!(f, concat!("\t\t\t\t\t{target_id} = {{\n",
+                      "\t\t\t\t\t\tCreatedOnToolsVersion = 11.0;\n",
+                      "\t\t\t\t\t}};\n"),
            target_id = data.target_id)?;
   }
 
-  write!(f, concat!("        }};\n",
-                    "      }};\n",
-                    "      buildConfigurationList = {cfg_list_id} /* ",
+  write!(f, concat!("\t\t\t\t}};\n",
+                    "\t\t\t}};\n",
+                    "\t\t\tbuildConfigurationList = {cfg_list_id} /* ",
                     "Build configuration list for PBXProject \"{project_name}\" */;\n",
-                    "      compatibilityVersion = \"Xcode 9.3\";\n",
-                    "      developmentRegion = en;\n",
-                    "      hasScannedForEncodings = 0;\n",
-                    "      knownRegions = (\n"),
+                    "\t\t\tcompatibilityVersion = \"Xcode 9.3\";\n",
+                    "\t\t\tdevelopmentRegion = en;\n",
+                    "\t\t\thasScannedForEncodings = 0;\n",
+                    "\t\t\tknownRegions = (\n"),
          cfg_list_id  = project_cfgs.id,
          project_name = ctx.project.name)?;
 
   for region in ["en", "Base"].iter() {
-    write!(f, "       {},\n", region)?;
+    write!(f, "\t\t\t\t{},\n", region)?;
   }
 
-  write!(f, concat!("      );\n",
-                    "      mainGroup = {main_group_id};\n",
-                    "      productRefGroup = {product_group_id} /* Products */;\n",
-                    "      projectDirPath = {project_dir_path:?};\n",
-                    "      projectRoot = \"\";\n",
-                    "      targets = (\n"),
+  write!(f, concat!("\t\t\t);\n",
+                    "\t\t\tmainGroup = {main_group_id};\n",
+                    "\t\t\tproductRefGroup = {product_group_id} /* Products */;\n",
+                    "\t\t\tprojectDirPath = {project_dir_path};\n",
+                    "\t\t\tprojectRoot = \"\";\n",
+                    "\t\t\ttargets = (\n"),
          main_group_id    = main_group.id,
          product_group_id = main_group.groups.last().unwrap().id,
-         project_dir_path = ctx.input_rel)?;
+         project_dir_path = quote(ctx.input_rel.to_str().unwrap()))?;
 
   for data in targets.iter().flatten().flatten() {
-      write!(f, "        {} /* {} */,\n", data.target_id, &data.product_name)?;
+    write!(f, "\t\t\t\t{} /* {} */,\n", data.target_id, &data.product_name)?;
   }
 
-  let variants = ""; // TODO
-  write!(f, concat!("      );\n",
-                    "    }};\n",
+  // let variants = ""; // TODO
+  write!(f, concat!("\t\t\t);\n",
+                    "\t\t}};\n",
                     "/* End PBXProject section */\n",
                     "\n",
                     "/* Begin PBXResourcesBuildPhase section */\n",
@@ -1202,10 +1358,10 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
                     "{sources}",
                     "/* End PBXSourcesBuildPhase section */\n",
                     "\n",
-                    "/* Begin PBXVariantGroup section */\n",
-                    "{variants}",
-                    "/* End PBXVariantSection section */\n",
-                    "\n",
+                    // "/* Begin PBXVariantGroup section */\n",
+                    // "{variants}",
+                    // "/* End PBXVariantSection section */\n",
+                    // "\n",
                     "/* Begin XCBuildConfiguration section */\n",
                     "{cfgs}",
                     "/* End XCBuildConfiguration section */\n",
@@ -1213,7 +1369,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
                     "/* Begin XCConfigurationList section */\n"),
          resources = resources,
          sources   = sources,
-         variants  = variants,
+         // variants  = variants,
          cfgs      = cfgs)?;
 
   project_cfgs.write(&mut f, "PBXProject", &ctx.project.name)?;
@@ -1223,8 +1379,8 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   }
 
   write!(f, concat!("/* End XCConfigurationList section */\n",
-                    "  }};\n",
-                    "  rootObject = {project_id} /* Project object */;\n",
+                    "\t}};\n",
+                    "\trootObject = {project_id} /* Project object */;\n",
                     "}}\n"),
          project_id = project_id)?;
 
@@ -1241,14 +1397,11 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 // TODO shell script build phases
 
 // TODO framework build file settings
-// - *.framework in Frameworks
 // - *.framework in Embed Frameworks; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); };
 
 // TODO library header build files
 // - *.h in CopyFiles
 // - *.h in Headers; settings = {ATTRIBUTES = (Public, ); };
-
-// TODO PBXFrameworksBuildPhase
 
 // TODO PBXHeadersBuildPhase
 // ???? for all library header files?
