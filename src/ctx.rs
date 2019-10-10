@@ -77,6 +77,17 @@ impl FileInfo {
   pub fn extension(&self) -> &'_ str {
     self.path.extension().unwrap().to_str().unwrap()
   }
+
+  pub fn is_header(&self) -> bool {
+    if !self.meta.is_file() {
+      return false;
+    }
+
+    match self.extension() {
+      "h" | "hpp" => true,
+      _           => false
+    }
+  }
 }
 
 #[derive(Debug, Default, Deserialize)]

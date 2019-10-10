@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs::{File, create_dir_all};
 use std::io::{BufWriter, Write};
 
@@ -22,8 +23,9 @@ impl Generator for CMake {
       return Ok(());
     }
 
-    let input_rel   = ctx.input_rel.join("..");
-    let mut sources = Vec::with_capacity(ctx.sources.len());
+    let input_rel    = ctx.input_rel.join("..");
+    let mut sources  = Vec::with_capacity(ctx.sources.len());
+    let mut includes = Vec::with_capacity(ctx.sources.len());
 
     let targets = ctx.project.targets.iter().enumerate().map(|(index, (name, target))| {
       let builds = PLATFORMS.iter().map(move |&platform| {
@@ -40,20 +42,38 @@ impl Generator for CMake {
       }).flatten().collect::<Vec<Build>>();
 
       let mut s = String::new();
+      let mut i = String::new();
       if !builds.is_empty() {
         for src in ctx.sources[index].iter().filter(|x| x.meta.is_file()) {
           s.push_str("  ");
           s.push_str(input_rel.join(&src.path).to_str().unwrap());
           s.push('\n');
         };
+
+        let mut incs = Vec::new();
+        for inc in ctx.sources[index].iter().filter(|x| x.is_header()) {
+          incs.push(inc.path.parent().unwrap());
+        }
+
+        incs.dedup();
+
+        for inc in incs {
+          i.push_str("  ");
+          i.push_str(input_rel.join(inc).to_str().unwrap());
+          i.push('\n');
+        }
       }
 
       sources.push(s);
+      includes.push(i);
       builds
     }).flatten().collect::<Vec<Build>>();
 
     for build in targets {
-      write_lists_txt(ctx, &build, &sources[build.index])?;
+      write_lists_txt(ctx, &build, &TargetInfo {
+        sources:  &sources[build.index],
+        includes: &includes[build.index]
+      })?;
     }
 
     Ok(())
@@ -61,6 +81,11 @@ impl Generator for CMake {
 }
 
 type IO = std::io::Result<()>;
+
+struct TargetInfo<'a> {
+  sources:  &'a String,
+  includes: &'a String
+}
 
 struct Build<'a> {
   index:    usize,
@@ -70,7 +95,7 @@ struct Build<'a> {
   platform: PlatformType
 }
 
-fn write_lists_txt(ctx: &Context, build: &Build, sources: &String) -> IO {
+fn write_lists_txt(ctx: &Context, build: &Build, info: &TargetInfo) -> IO {
   let mut f = BufWriter::new(File::create({
     let mut path = ctx.build_dir.join(&build.path);
     create_dir_all(&path)?;
@@ -90,18 +115,25 @@ fn write_lists_txt(ctx: &Context, build: &Build, sources: &String) -> IO {
     _ => unreachable!()
   };
 
-  let includes = match build.platform { // TODO dont hardcode
+  let sources: Cow<'_, str> = match build.platform { // TODO dont hardcode
     PlatformType::Android =>
-      concat!("  ${ANDROID_NDK}/sources/android/native_app_glue\n",
-              "  ${ANDROID_NDK}/sources/third_party/shaderc/include\n"),
-    _ => ""
+      Cow::Owned([info.sources,
+                  "  ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c\n"].join("")),
+    _ => Cow::Borrowed(&info.sources)
+  };
+
+  let includes: Cow<'_, str> = match build.platform { // TODO dont hardcode
+    PlatformType::Android =>
+      Cow::Owned([info.includes,
+                  concat!("  ${ANDROID_NDK}/sources/android/native_app_glue\n",
+                          "  ${ANDROID_NDK}/sources/third_party/shaderc/include\n")].join("")),
+    _ => Cow::Borrowed(&info.includes)
   };
 
   let libraries = match build.platform { // TODO dont hardcode
     PlatformType::Android =>
       concat!("  android\n",
               "  log\n",
-              "  native_app_glue\n",
               "  vulkan\n",
               "  ${ANDROID_NDK}/sources/third_party/shaderc/libs/c++_static/${ANDROID_ABI}/libshaderc.a\n"),
     PlatformType::HTML5 => "",
