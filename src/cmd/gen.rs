@@ -16,3 +16,8 @@ impl Command for Gen {
     Ok(())
   }
 }
+
+// NOTE: Tried to parallelize run() using crossbeam_utils::thread::scoped,
+//       it ended up being ~20ms slower in release builds.
+//       May want to try again later with larger projects, and when
+//       generators get more complex.

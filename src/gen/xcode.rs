@@ -81,23 +81,7 @@ use std::path::{Path, PathBuf};
 use std::str::from_utf8;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::ctx::{Context, Generator, PlatformType, RunResult, Target, TargetType};
-
-// TODO move to ctx for reuse
-#[derive(Debug)]
-struct StrError(String);
-
-impl std::fmt::Display for StrError {
-  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-    write!(f, "{}", self.0)
-  }
-}
-
-impl std::error::Error for StrError {
-  fn description(&self) -> &str {
-    self.0.as_str()
-  }
-}
+use crate::ctx::{Context, Generator, PlatformType, RunResult, StrError, Target, TargetType};
 
 const PLATFORMS: [PlatformType; 4] = [
   PlatformType::MacOS,
@@ -799,6 +783,17 @@ fn sdk_info(p: PlatformType) -> (&'static str, &'static str) {
   }
 }
 
+fn build_project_group<'a>(ctx: &Context, refs: &mut String) -> Group<'a> {
+  let mut g = Group::new(Some("Project"), None);
+  for f in ctx.metafiles {
+    let id   = random_id();
+    let name = f.name();
+    write_file_ref(refs, &id, name, None, "text", GROUP_REF);
+    g.push(&id, name);
+  }
+  g
+}
+
 fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   // Open the file for writing right away to bail out early on failure.
   let mut f = BufWriter::new(File::create(path)?);
@@ -1223,6 +1218,8 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   if ctx.project.info.xcode.group_by_target && !shared_group.is_empty() {
     main_group.push_group(shared_group);
   }
+
+  main_group.push_group(build_project_group(ctx, &mut refs));
 
   if !frameworks_group.is_empty() {
     main_group.push_group(frameworks_group);

@@ -5,13 +5,28 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-pub trait Command {
+#[derive(Debug)]
+pub struct StrError(pub String);
+
+impl std::fmt::Display for StrError {
+  fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    write!(f, "{}", self.0)
+  }
+}
+
+impl std::error::Error for StrError {
+  fn description(&self) -> &str {
+    self.0.as_str()
+  }
+}
+
+pub trait Command : Sync {
   fn init<'a, 'b>(&self, cmd: App<'a, 'b>) -> App<'a, 'b>;
 
   fn run(&self, ctx: &Context) -> RunResult;
 }
 
-pub trait Platform {
+pub trait Platform : Sync {
   fn get_platform_type(&self) -> PlatformType;
 
   fn supports_architecture(&self, a: Architecture) -> bool;
@@ -19,7 +34,7 @@ pub trait Platform {
   fn run(&self, ctx: &Context) -> RunResult;
 }
 
-pub trait Generator {
+pub trait Generator : Sync {
   fn supports_platform(&self, p: PlatformType) -> bool;
 
   fn run(&self, ctx: &Context) -> RunResult;
@@ -53,6 +68,7 @@ pub struct Context<'a> {
   pub sources:   &'a AllFiles,
   pub resources: &'a AllFiles,
   pub assets:    &'a AllFiles,
+  pub metafiles: &'a TargetFiles,
 
   pub profiles: Vec<&'a str>,
   pub defaults: Profiles<'a>
@@ -184,21 +200,11 @@ pub struct TargetFilter {
 
 impl TargetFilter {
   pub fn matches_platform(&self, p: PlatformType) -> bool {
-    if !self.platforms.is_empty() {
-      self.platforms.contains(&p)
-    }
-    else {
-      true
-    }
+    self.platforms.is_empty() || self.platforms.contains(&p)
   }
 
   pub fn matches_architecture(&self, a: Architecture) -> bool {
-    if !self.architectures.is_empty() {
-      self.architectures.contains(&a)
-    }
-    else {
-      true
-    }
+    self.architectures.is_empty() || self.architectures.contains(&a)
   }
 }
 

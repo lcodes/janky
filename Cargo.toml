@@ -22,13 +22,16 @@ publish     = false
 clap       = { version = "2.33", features = ["suggestions", "vec_map"] }
 envy       = { version = "0.4" }
 glob       = { version = "0.3" }
-pathdiff   = { version = "0.1.0" }
-rand       = { version = "0.7.2" }
+pathdiff   = { version = "0.1" }
+rand       = { version = "0.7" }
 semver     = { version = "0.9" }
-serde      = { version = "1.0.101", features = ["derive"] }
-serde_json = { version = "1.0.41" }
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
 serde_repr = { version = "0.1" }
 toml       = { version = "0.5" }
 uuid       = { git = "https://github.com/uuid-rs/uuid", features = ["v4"] }
 
-# NOTE: uuid uses git because the current latest on crates.io depends on older rand
+# crossbeam-utils = { version = "0.6" } # See note in src/cmd/gen.rs
+
+# NOTE: using git for some dependencies to use the latest sub-dependencies:
+#       - uuid to use latest rand

@@ -85,17 +85,33 @@ fn main() {
 
   (!project.targets.is_empty()).check(|| "No targets in project configuration");
 
+  // Resolve the project's files.
   let sources   = find_all_files(&input_dir, &project.targets, |x| &x.sources);
   let resources = find_all_files(&input_dir, &project.targets, |x| &x.resources);
 
-  let mut assets = ctx::AllFiles::new();
-  for (name, target) in &project.targets {
-    assets.push(match target.assets {
-      None      => Vec::new(),
-      Some(dir) => find_files(&input_dir, &[[dir, "/**/*"].join("").as_str()])
-        .check(|| format!("Failed to resolve assets for target {}", name))
+  let assets = project.targets.iter()
+    .fold(ctx::AllFiles::new(), |mut assets, (name, target)| {
+      assets.push(match target.assets {
+        None      => Vec::new(),
+        Some(dir) => find_files(&input_dir, &[[dir, "/**/*"].join("").as_str()])
+          .check(|| format!("Failed to resolve assets for target {}", name))
+      });
+      assets
     });
-  }
+
+  let metafiles = std::fs::read_dir(&input_dir).unwrap()
+    .fold(Vec::new(), |mut files, entry| {
+      if let Ok(e) = entry {
+        // Poor man's gitignore, didn't use gitignore.rs because it is too slow.
+        match e.path().to_str().unwrap() {
+          ".git" | ".DS_Store" => {},
+          _ => if let Ok(meta) = e.metadata() {
+            files.push(ctx::FileInfo { path: e.path(), meta });
+          }
+        }
+      }
+      files
+    });
 
   // #[cfg(debug_assertions)]
   // println!("{:#?}", project);
@@ -109,6 +125,7 @@ fn main() {
     sources:   &sources,
     resources: &resources,
     assets:    &assets,
+    metafiles: &metafiles,
     profiles:  profile_names(&defaults, &project),
     build_rel: pathdiff::diff_paths(&build_dir, &input_dir).unwrap(),
     input_rel: pathdiff::diff_paths(&input_dir, &build_dir).unwrap(),
