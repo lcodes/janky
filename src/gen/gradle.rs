@@ -1,5 +1,6 @@
 use std::fs::{File, create_dir_all};
 use std::io::{BufWriter, Write};
+use std::path::Path;
 
 use crate::ctx::{Context, Generator, PlatformType, RunResult, Target, TargetType};
 
@@ -19,11 +20,11 @@ impl Generator for Gradle {
       return Ok(());
     }
 
-    let targets = ctx.project.targets.iter().filter_map(|(name, target)| {
+    let targets = ctx.project.targets.iter().enumerate().filter_map(|(index, (name, target))| {
       match target.filter.matches_platform(PlatformType::Android) &&
         target.target_type == TargetType::Application {
           false => None,
-          true  => Some(Build { name, target, path: [name, "_Android"].join("") })
+          true  => Some(Build { name, target, index, path: [name, "_Android"].join("") })
         }}).collect::<Vec<Build>>();
 
     if targets.is_empty() {
@@ -47,7 +48,8 @@ type IO = std::io::Result<()>;
 struct Build<'a> {
   path:   String,
   name:   &'a str,
-  target: &'a Target<'a>
+  target: &'a Target<'a>,
+  index:  usize
 }
 
 fn write_target_build(ctx: &Context, build: &Build) -> IO {
@@ -127,7 +129,7 @@ fn write_target_build(ctx: &Context, build: &Build) -> IO {
   // TODO handle assets
   // - AndroidManifest.xml
   // - symlink other xml files
-  write_target_manifest(ctx, build, &path)?;
+  write_target_manifest(ctx, &path, build)?;
 
   f.flush()?;
   Ok(())
@@ -180,26 +182,67 @@ fn write_settings(ctx: &Context, builds: &Vec<Build>) -> IO {
   Ok(())
 }
 
-fn write_target_manifest(ctx: &Context, build: &Build, path: &std::path::Path) -> IO {
-  let mut f = File::create(path.join("AndroidManifest.xml"))?;
-  write!(f, concat!("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
-                    "<manifest\n",
+const XML_DECL: &[u8] = b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
+
+/// https://developer.android.com/guide/topics/manifest/manifest-intro
+fn write_target_manifest(ctx: &Context, path: &Path, build: &Build) -> IO {
+  // TODO android TV banner
+
+  // TODO uses-configuration
+  // TODO uses-library
+  // TODO uses-permission / uses-permission-sdk-23
+  // TODO supports-gl-texture
+  // TODO supports-screens
+
+  // TODO dont hardcode
+  let features = ["android.hardware.audio.output",
+                  "android.hardware.screen.landscape"];
+  let feature_versions = [("android.hardware.vulkan.compute", "0"),
+                          ("android.hardware.vulkan.level",   "0"),
+                          ("android.hardware.vulkan.version", "0x400003")];
+
+  let mut f = BufWriter::new(File::create(path.join("AndroidManifest.xml"))?);
+  f.write(XML_DECL)?;
+
+  write!(f, concat!("<manifest\n",
                     "    xmlns:android=\"http://schemas.android.com/apk/res/android\"\n",
                     "    package=\"{application_id}\"\n",
                     "    android:versionCode=\"{version_code}\"\n",
                     "    android:versionName=\"{version_name}\">\n",
                     "  <uses-sdk\n",
                     "      android:minSdkVersion=\"{min_sdk_version}\"\n",
-                    "      android:targetSdkVersion=\"{target_sdk_version}\" />\n",
-                    "  <application\n",
+                    "      android:targetSdkVersion=\"{target_sdk_version}\" />\n"),
+         application_id     = "com.lambdacoder.Jank",
+         version_code       = 1,
+         version_name       = "1.0",
+         min_sdk_version    = 26,
+         target_sdk_version = 29)?;
+
+  for name in &features { // TODO android:required attribute
+    write!(f, "  <uses-feature android:name=\"{}\" />\n", name)?;
+  }
+
+  for (name, version) in &feature_versions {
+    write!(f, concat!("  <uses-feature\n",
+                      "      android:name=\"{name}\"\n",
+                      "      android:version=\"{version}\"\n",
+                      "      android:required=\"true\" />\n"),
+           name    = name,
+           version = version)?;
+  }
+
+  // TODO android:name ?
+  write!(f, concat!("  <application\n",
                     "      android:allowBackup=\"false\"\n",
-                    "      android:fullBackupContent=\"false\"\n",
-                    "      android:label=\"{target_name}\"\n",
+                    "      android:description=\"@string/app_description\"\n",
+                    "      android:label=\"@string/app_label\"\n",
+                    "      android:icon=\"@mipmap/ic_launcher\"\n",
+                    "      android:roundIcon=\"@mipmap/ic_launcher_round\"\n",
                     // "      android:theme=\"@style/AppTheme\"\n",
+                    "      android:isGame=\"true\"\n",
                     "      android:hasCode=\"false\">\n",
                     "    <activity\n",
                     "        android:name=\"android.app.NativeActivity\"\n",
-                    "        android:label=\"{target_name}\"\n",
                     "        android:configChanges=\"{config_changes}\">\n",
                     "      <meta-data\n",
                     "          android:name=\"android.app.lib_name\"\n",
@@ -212,14 +255,95 @@ fn write_target_manifest(ctx: &Context, build: &Build, path: &std::path::Path) -
                     "  </application>\n",
                     "</manifest>\n"),
          // TODO dont hardcode
-         application_id     = "com.lambdacoder.Jank",
-         version_code       = 1,
-         version_name       = "1.0",
-         min_sdk_version    = 26,
-         target_sdk_version = 29,
          target_name        = build.name,
-         config_changes     = "keyboardHidden|keyboard|orientation|screenSize"
-  )?;
+         config_changes     = "keyboardHidden|keyboard|orientation|screenSize")?;
+
+  write_strings(ctx, path)?;
+  write_mipmaps(ctx, path, build)?;
+  // - styles
+
+  f.flush()?;
+  Ok(())
+}
+
+fn write_strings(ctx: &Context, path: &Path) -> IO {
+  let mut res = path.join("res/values");
+  create_dir_all(&res)?;
+  res.push("string.xml");
+
+  let mut f = BufWriter::new(File::create(res)?);
+  f.write(XML_DECL)?;
+  f.write(b"<resources>\n")?;
+
+  // TODO more strings? TODO from target, not project
+  let strings = [("app_label",       ctx.project.name),
+                 ("app_description", ctx.project.description)];
+
+  for (name, value) in &strings {
+    write!(f, "  <string name=\"{}\">{}</string>\n", name, value)?;
+  }
+
+  f.write(b"</resources>\n")?;
+  f.flush()?;
+  Ok(())
+}
+
+fn write_mipmaps(ctx: &Context, path: &Path, build: &Build) -> IO {
+  if build.target.assets.is_none() {
+    return Ok(());
+  }
+
+  let src = pathdiff::diff_paths(&ctx.input_dir, &path.join("res/mipmap")).unwrap();
+
+  let pattern = [build.target.assets.unwrap(), "/android/"].join("");
+  let assets  = ctx.assets[build.index].iter()
+    .filter(|info| info.meta.is_file() && info.to_str().starts_with(&pattern));
+
+  for asset in assets {
+    let s = &asset.to_str()[pattern.len() ..];
+
+    if !s.ends_with(".png") {
+      continue;
+    }
+
+    if let Some(pos) = s.rfind('_') {
+      let dpi  = &s[pos + 1 .. s.len() - 4];
+      let name = &s[0 .. pos];
+
+      let mut res = path.join(["res/mipmap-", dpi].join(""));
+      create_dir_all(&res)?;
+
+      res.push([name, ".png"].join(""));
+      // TODO move remove&symlink to shared utility
+      if res.symlink_metadata().is_ok() {
+        std::fs::remove_file(&res)?;
+      }
+
+      std::os::unix::fs::symlink(src.join(&asset.path), &res)?; // TODO copy on windows
+    }
+  }
+
+  let adaptive_path = path.join("res/mipmap-anydpi-v26");
+  create_dir_all(&adaptive_path)?;
+
+  let background = "@mipmap/ic_launcher_background"; // TODO color/vector backgrounds
+  let foreground = "@mipmap/ic_launcher_foreground";
+
+  write_adaptive_icon(&adaptive_path.join("ic_launcher.xml"),       background, foreground)?;
+  write_adaptive_icon(&adaptive_path.join("ic_launcher_round.xml"), background, foreground)?;
+
+  Ok(())
+}
+
+fn write_adaptive_icon(path: &Path, background: &str, foreground: &str) -> IO {
+  let mut f = File::create(path)?;
+  f.write(XML_DECL)?;
+
+  write!(f, concat!("<adaptive-icon xmlns:android=\"http://schemas.android.com/apk/res/android\">\n",
+                    "  <background android:drawable=\"{}\" />\n",
+                    "  <foreground android:drawable=\"{}\" />\n",
+                    "</adaptive-icon>\n"),
+         background, foreground)?;
 
   f.flush()?;
   Ok(())

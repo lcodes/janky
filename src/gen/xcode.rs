@@ -973,7 +973,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
           let assets_pattern = [dir, platform_pattern].join("");
           let assets = ctx.assets[target_index].iter()
             .filter(|info| info.meta.is_file() && info.to_str().starts_with(&assets_pattern))
-            .map   (|info| parse_asset(&info.path, &info.to_str()[assets_pattern.len()..]))
+            .map   (|info| parse_asset(&info.path, &info.to_str()[assets_pattern.len() ..]))
             .flatten()
             .fold(AssetContent {
               name: &assets_name,
