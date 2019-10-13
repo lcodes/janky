@@ -44,7 +44,7 @@ impl Generator for CMake {
       let mut s = String::new();
       let mut i = String::new();
       if !builds.is_empty() {
-        for src in ctx.sources[index].iter().filter(|x| x.meta.is_file()) {
+        for src in ctx.sources[index].iter().filter(|x| x.is_source_no_objc()) {
           s.push_str("  ");
           s.push_str(input_rel.join(&src.path).to_str().unwrap());
           s.push('\n');
@@ -106,8 +106,8 @@ fn write_lists_txt(ctx: &Context, build: &Build, info: &TargetInfo) -> IO {
   let (target_type, target_subtype) = match build.target.target_type {
     TargetType::Application => {
       match build.platform {
-        PlatformType::Android => ("library",     " SHARED"),
-        _                     => ("application", "")
+        PlatformType::Android => ("library",    " SHARED"),
+        _                     => ("executable", "")
       }
     },
     TargetType::StaticLibrary => ("library", " STATIC"),
@@ -134,15 +134,48 @@ fn write_lists_txt(ctx: &Context, build: &Build, info: &TargetInfo) -> IO {
     PlatformType::Android =>
       concat!("  android\n",
               "  log\n",
+              "  EGL\n",
+              "  GLESv3\n",
               "  vulkan\n",
               "  ${ANDROID_NDK}/sources/third_party/shaderc/libs/c++_static/${ANDROID_ABI}/libshaderc.a\n"),
-    PlatformType::HTML5 => "",
+    PlatformType::HTML5 =>
+      concat!("  openal\n",
+              "  websocket.js\n"),
     PlatformType::Linux => "",
     _ => unreachable!()
   };
 
-  write!(f, concat!("cmake_minimum_required(VERSION {cmake_version})\n\n",
-                    "set(CMAKE_CXX_FLAGS \"${{CMAKE_CXX_FLAGS}} -Wall -Werror -fno-exceptions -fno-rtti\")\n\n",
+  let cmake_version = "3.10.2"; // TODO dont hardcode
+  write!(f, concat!("cmake_minimum_required(VERSION {})\n",
+                    "project({})\n\n"),
+         cmake_version, build.name)?;
+
+  if build.platform == PlatformType::HTML5 {
+    f.write(concat!("if (NOT ${CMAKE_SYSTEM_NAME} MATCHES \"Emscripten\")\n",
+                    "  message(FATAL_ERROR \"Failed to detect Emscripten: run with 'emcmake cmake .'\")\n",
+                    "endif ()\n\n",
+                    "set(CMAKE_EXECUTABLE_SUFFIX \".html\")\n",
+                    "set(CMAKE_RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}/dist\")\n\n"
+    ).as_bytes())?;
+
+    // TODO hardcoded
+    let flags = concat!(" -s WASM=1",
+                        " -s USE_WEBGL2=1",
+                        " -s EXIT_RUNTIME=1",
+                        " -s ASSERTIONS=2",
+                        " -s DISABLE_DEPRECATED_FIND_EVENT_TARGET_BEHAVIOR=1",
+                        " --emrun",
+                        " --preload-file ../../demo");
+    write!(f, "set(CMAKE_EXE_LINKER_FLAGS \"${{CMAKE_EXE_LINKER_FLAGS}}{}\")\n\n", flags)?;
+  }
+
+  // TODO hardcoded flags
+  let flags         = "-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti";
+  let release_flags = "-Werror";
+  write!(f, concat!("set(CMAKE_CXX_FLAGS \"{flags}\")\n",
+                    "set(CMAKE_CXX_FLAGS_MINSIZEREL \"{release_flags}\")\n",
+                    "set(CMAKE_CXX_FLAGS_RELWITHDEBINFO \"{release_flags}\")\n",
+                    "set(CMAKE_CXX_FLAGS_RELEASE \"{release_flags}\")\n\n",
                     "add_{target_type}({target_name}{target_subtype}\n",
                     "{sources}",
                     "  )\n\n",
@@ -156,8 +189,9 @@ fn write_lists_txt(ctx: &Context, build: &Build, info: &TargetInfo) -> IO {
                     "  )\n\n",
                     "target_link_libraries({target_name} PRIVATE\n",
                     "{libraries}",
-                    "  )\n\n"),
-         cmake_version  = "3.10.2",
+                    "  )\n"),
+         flags          = flags,
+         release_flags  = release_flags,
          target_name    = build.name,
          target_type    = target_type,
          target_subtype = target_subtype,

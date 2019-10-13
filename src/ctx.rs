@@ -94,12 +94,15 @@ impl FileInfo {
     self.path.extension().unwrap().to_str().unwrap()
   }
 
-  pub fn is_header(&self) -> bool {
-    if !self.meta.is_file() {
-      return false;
+  pub fn is_source_no_objc(&self) -> bool {
+    self.meta.is_file() && match self.extension() {
+      "m" | "mm" => false,
+      _          => true
     }
+  }
 
-    match self.extension() {
+  pub fn is_header(&self) -> bool {
+    self.meta.is_file() && match self.extension() {
       "h" | "hpp" => true,
       _           => false
     }

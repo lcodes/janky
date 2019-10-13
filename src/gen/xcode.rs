@@ -168,7 +168,7 @@ fn hex_char(b: u8) -> char {
 }
 
 fn quote(s: &str) -> Cow<'_, str> {
-  match s.is_empty() || s.contains(' ') {
+  match s.is_empty() || s.contains(' ') || s.contains('-') {
     true  => Cow::Owned(["\"", s, "\""].join("")),
     false => Cow::Borrowed(s)
   }
@@ -862,10 +862,76 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
     let id = random_id();
     build_cfg(&mut cfgs, &id, prof, |s| {
-      s.push_str("\t\t\t\tALWAYS_SEARCH_USER_PATHS = NO;\n");
+      s.push_str("\t\t\t\tALWAYS_SEARCH_USER_PATHS = NO;\n"); // Deprecated, must be set to NO.
 
-      write!(s, concat!("\t\t\t\tCLANG_CXX_LANGUAGE_STANDARD = \"c++17\";\n",
-                        "\t\t\t\tGCC_C_LANGUAGE_STANDARD = c11;\n")).unwrap();
+      // TODO dont hardcode
+      let release   = *prof == "Release";
+      let debug_fmt = match release {
+        true  => "\"dwarf-with-dsym\"",
+        false => "dwarf"
+      };
+      write!(s, concat!("\t\t\t\tCLANG_ANALYZER_NONNULL = YES;\n",
+                        "\t\t\t\tCLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;\n",
+                        "\t\t\t\tCLANG_CXX_LANGUAGE_STANDARD = \"gnu++17\";\n",
+                        "\t\t\t\tCLANG_CXX_LIBRARY = \"libc++\";\n",
+                        "\t\t\t\tCLANG_ENABLE_MODULES = YES;\n",
+                        "\t\t\t\tCLANG_ENABLE_OBJC_ARC = YES;\n",
+                        "\t\t\t\tCLANG_ENABLE_OBJC_WEAK = YES;\n",
+                        "\t\t\t\tCOPY_PHASE_STRIP = NO;\n",
+                        "\t\t\t\tDEBUG_INFORMATION_FORMAT = {};\n"),
+             debug_fmt).unwrap();
+
+      // TODO AVX2
+
+      if release {
+        s.push_str("\t\t\t\tENABLE_NS_ASSERTIONS = NO;\n");
+      }
+
+      s.push_str("\t\t\t\tENABLE_STRICT_OBJC_MSGSEND = YES;\n");
+
+      if !release {
+        s.push_str("\t\t\t\tENABLE_TESTABILITY = YES;\n");
+      }
+
+      write!(s, concat!("\t\t\t\tGCC_C_LANGUAGE_STANDARD = gnu11;\n",
+                        "\t\t\t\tGCC_DYNAMIC_NO_PIC = NO;\n",
+                        "\t\t\t\tGCC_ENABLE_CPP_EXCEPTIONS = NO;\n",
+                        "\t\t\t\tGCC_ENABLE_CPP_RTTI = NO;\n" ,
+                        "\t\t\t\tGCC_NO_COMMON_BLOCKS = YES;\n")).unwrap();
+
+      let opt = match release {
+        true  => "3",
+        false => "0"
+      };
+      write!(s, "\t\t\t\tGCC_OPTIMIZATION_LEVEL = {};\n", opt).unwrap();
+
+      let defines = match release {
+        true  => &[] as &[&str],
+        false => &["DEBUG=1"]
+      };
+      if !defines.is_empty() {
+        s.push_str("\t\t\t\tGCC_PREPROCESSOR_DEFINITIONS = (\n");
+
+        for d in defines {
+          write!(s, "\t\t\t\t\t\"{}\",\n", d).unwrap();
+        }
+
+        s.push_str(concat!("\t\t\t\t\t\"$(inherited)\",\n",
+                           "\t\t\t\t);\n"));
+      }
+
+      if !release {
+        s.push_str("\t\t\t\tONLY_ACTIVE_ARCH = YES;\n");
+      }
+      else {
+        s.push_str("\t\t\t\tLLVM_LTO = YES;\n");
+      }
+
+      write!(s, concat!("\t\t\t\tWARNING_CFLAGS = (\n",
+                        "\t\t\t\t\t\"-Wall\",\n",
+                        "\t\t\t\t\t\"-Wextra\",\n",
+                        "\t\t\t\t\t\"-Wpedantic\",\n",
+                        "\t\t\t\t);\n")).unwrap();
     });
     project_cfgs.push(&id, prof);
     // profiles.clear();
@@ -924,8 +990,8 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
       let (sdk_source, sdk_prefix) = sdk_info(platform);
       let link_frameworks = match platform { // TODO dont hardcode
         PlatformType::WatchOS => &[] as &[&str],
-        PlatformType::MacOS   => &["AppKit", "Metal"],
-        _                     => &["UIKit", "Metal"]
+        PlatformType::MacOS   => &["AppKit", "CoreVideo", "Metal", "OpenGL"],
+        _                     => &["UIKit", "Metal", "OpenGLES", "QuartzCore"]
       };
 
       for lf in link_frameworks {
@@ -1055,17 +1121,17 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
               // TODO COMBINE_HIDPI_IMAGES = YES;
               sdk    = "macosx";
               family = "";
-              sdk_version = "\t\t\t\tMACOSX_DEPLOYMENT_TARGET = 10.14;\n";
+              sdk_version = "\t\t\t\tMACOSX_DEPLOYMENT_TARGET = 10.10;\n";
             },
             PlatformType::IOS => {
               sdk    = "iphoneos";
               family = "\"1,2\""; // TODO iphone vs ipad
-              sdk_version = "\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 13.0;\n";
+              sdk_version = "\t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 10.0;\n";
             },
             PlatformType::TVOS => {
               sdk    = "appletvos";
               family = "3";
-              sdk_version = "\t\t\t\tTVOS_DEPLOYMENT_TARGET = 13.0;\n";
+              sdk_version = "\t\t\t\tTVOS_DEPLOYMENT_TARGET = 10.0;\n";
             },
             PlatformType::WatchOS => {
               sdk    = "watchos";
