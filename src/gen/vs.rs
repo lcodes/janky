@@ -228,7 +228,9 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
   f.write_all(b"  <PropertyGroup Label=\"Globals\">\r\n")?;
   write!(f, "    <ProjectGuid>{{{}}}</ProjectGuid>\r\n", proj.uuid)?;
   //f.write_fmt(format_args!("    <Keyword>{}</Keyword>\r\n", "Android"))?;
-  write!(f, "    <RootNamespace>{}</RootNamespace>\r\n", proj.name)?;
+  write!(f, concat!("    <RootNamespace>{}</RootNamespace>\r\n",
+                    "    <IntDir>$(Platform)\\$(Configuration)\\$(ProjectName)</IntDir>\r\n"),
+         proj.name)?;
   f.write_all(b"  </PropertyGroup>\r\n")?;
 
   write_proj_import(&mut f, match proj.kind {
@@ -280,7 +282,7 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
 
   // TODO general properties for profiles/architectures
 
-  // TODO includes
+  let disable_warnings = "4324;4514;4571;4623;4625;4626;4710;4820;5026;5027;5045;6031;6387;26444";
   write!(f, concat!("  <ItemDefinitionGroup>\r\n",
                     "    <ClCompile>\r\n",
                     "      <WarningLevel>EnableAllWarnings</WarningLevel>\r\n",
@@ -291,6 +293,24 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
                     "      <RuntimeTypeInfo>false</RuntimeTypeInfo>\r\n",
                     // TODO disable exceptions
                     "      <CompileAsManaged>false</CompileAsManaged>\r\n",
+                    "      <DisableSpecificWarnings>{warnings}</DisableSpecificWarnings>\r\n",
+                    "      <AdditionalIncludeDirectories>\r\n"),
+         warnings = disable_warnings)?;
+
+  let files = &ctx.sources[index];
+  let prefix = ctx.input_rel.to_str().unwrap();
+  let mut include_paths = HashSet::new();
+
+  for header in files.iter().filter(|x| x.is_header()) {
+    if let Some(p) = header.path.parent() {
+      if !include_paths.contains(p) {
+        include_paths.insert(p);
+        write!(f, "{}\\{};", prefix, p.to_str().unwrap())?;
+      }
+    }
+  }
+
+  write!(f, concat!("%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>\r\n",
                     "      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>\r\n",
                     "    </ClCompile>\r\n",
                     "    <Link>\r\n",
@@ -307,7 +327,7 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
            profile      = prof,
            optimization = match *prof == "Release" {
              true  => "MaxSpeed",
-             false => "None"
+             false => "Disabled"
            })?;
 
     if *prof == "Release" {
@@ -324,8 +344,6 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
   // TODO project references
 
   // TODO per file settings? (at least create PCH)
-  let files = &ctx.sources[index];
-  let prefix = ctx.input_rel.to_str().unwrap();
   f.write_all(b"  <ItemGroup>\r\n")?;
   match proj.kind {
     ProjKind::Android => {
