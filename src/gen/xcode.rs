@@ -83,7 +83,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::ctx::{Context, Generator, PlatformType, RunResult, StrError, Target, TargetType};
 
-const PLATFORMS: [PlatformType; 4] = [
+const PLATFORMS: &[PlatformType] = &[
   PlatformType::MacOS,
   PlatformType::IOS,
   PlatformType::TVOS,
@@ -275,15 +275,15 @@ impl<'a> Group<'a> {
       Some(ident) => write!(f, "\t\t{} /* {} */ = {{\n", self.id, ident)?
     }
 
-    f.write(concat!("\t\t\tisa = PBXGroup;\n",
-                    "\t\t\tchildren = (\n").as_bytes())?;
+    f.write_all(concat!("\t\t\tisa = PBXGroup;\n",
+                        "\t\t\tchildren = (\n").as_bytes())?;
 
     for g in &self.groups {
       write!(f, "\t\t\t\t{} /* {} */,\n", g.id, g.get_name())?;
     }
 
-    f.write(self.children.as_bytes())?;
-    f.write("\t\t\t);\n".as_bytes())?;
+    f.write_all(self.children.as_bytes())?;
+    f.write_all("\t\t\t);\n".as_bytes())?;
 
     if let Some(x) = self.path {
       write!(f, "\t\t\tpath = {};\n", quote(x))?;
@@ -293,8 +293,8 @@ impl<'a> Group<'a> {
       write!(f, "\t\t\tname = {};\n", quote(x))?;
     }
 
-    f.write(concat!("\t\t\tsourceTree = \"<group>\";\n",
-                    "\t\t};\n").as_bytes())?;
+    f.write_all(concat!("\t\t\tsourceTree = \"<group>\";\n",
+                        "\t\t};\n").as_bytes())?;
 
     Ok(())
   }
@@ -393,29 +393,29 @@ fn get_file_type(ext: &'_ str) -> (Phase, &'static str) {
 fn write_info_plist(path: &Path) -> IO {
   let mut f = File::create(path)?;
 
-  f.write(concat!(r#"<?xml version="1.0" encoding="UTF-8"?>"#, "\n",
-                  r#"<!DOCTYPE plist PUBLIC "-//APPLE//DTD PLIST 1.0//EN" "#,
-                  r#""http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#, "\n",
-                  r#"<plist version="1.0">"#, "\n",
-                  "<dict>\n",
-                  "  <key>CFBundleDevelopmentRegion</key>\n",
-                  "  <string>${DEVELOPMENT_LANGUAGE}</string>\n",
-                  "  <key>CFBundleExecutable</key>\n",
-                  "  <string>${EXECUTABLE_NAME}</string>\n",
-                  "  <key>CFBundleIdentifier</key>\n",
-                  "  <string>${PRODUCT_BUNDLE_IDENTIFIER}</string>\n",
-                  "  <key>CFBundleInfoDictionaryVersion</key>\n",
-                  "  <string>6.0</string>\n",
-                  "  <key>CFBundleName</key>\n",
-                  "  <string>${PRODUCT_NAME}</string>\n",
-                  "  <key>CFBundlePackageType</key>\n",
-                  "  <string>${PRODUCT_BUNDLE_PACKAGE_TYPE}</string>\n",
-                  "  <key>CFBundleShortVersionString</key>\n",
-                  "  <string>1.0</string>\n",
-                  "  <key>CFBundleVersion</key>\n",
-                  "  <string>1</string>\n",
-                  "</dict>\n",
-                  "</plist>\n").as_bytes())?;
+  f.write_all(concat!(r#"<?xml version="1.0" encoding="UTF-8"?>"#, "\n",
+                      r#"<!DOCTYPE plist PUBLIC "-//APPLE//DTD PLIST 1.0//EN" "#,
+                      r#""http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#, "\n",
+                      r#"<plist version="1.0">"#, "\n",
+                      "<dict>\n",
+                      "  <key>CFBundleDevelopmentRegion</key>\n",
+                      "  <string>${DEVELOPMENT_LANGUAGE}</string>\n",
+                      "  <key>CFBundleExecutable</key>\n",
+                      "  <string>${EXECUTABLE_NAME}</string>\n",
+                      "  <key>CFBundleIdentifier</key>\n",
+                      "  <string>${PRODUCT_BUNDLE_IDENTIFIER}</string>\n",
+                      "  <key>CFBundleInfoDictionaryVersion</key>\n",
+                      "  <string>6.0</string>\n",
+                      "  <key>CFBundleName</key>\n",
+                      "  <string>${PRODUCT_NAME}</string>\n",
+                      "  <key>CFBundlePackageType</key>\n",
+                      "  <string>${PRODUCT_BUNDLE_PACKAGE_TYPE}</string>\n",
+                      "  <key>CFBundleShortVersionString</key>\n",
+                      "  <string>1.0</string>\n",
+                      "  <key>CFBundleVersion</key>\n",
+                      "  <string>1</string>\n",
+                      "</dict>\n",
+                      "</plist>\n").as_bytes())?;
 
   f.flush()?;
   Ok(())
@@ -720,8 +720,11 @@ fn write_contents_json(root: &Path, path: &Path, content: &AssetContent) -> IO {
       remove_file(&target)?;
     }
 
-    // TODO copy on windows (TODO 2: should this generator run on windows?)
+    #[cfg(unix)]
     std::os::unix::fs::symlink(src.join(image.path), &target)?;
+
+    // #[cfg(windows)]
+    // std::os::windows::fs::symlink_file(src.join(image.path), &target)?;
   }
 
   for child in &content.children {
@@ -1321,7 +1324,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
   main_group.write(&mut f)?;
 
-  f.write(concat!("/* End PBXGroup section */\n",
+  f.write_all(concat!("/* End PBXGroup section */\n",
                   "\n",
                   "/* Begin PBXNativeTarget section */\n").as_bytes())?;
 

@@ -98,22 +98,22 @@ fn write_target_build(ctx: &Context, build: &Build) -> IO {
 
     match prof { // TODO dont hardcode this
       "Debug" => {
-        f.write(concat!("      packagingOptions {\n",
-                        "        doNotStrip '**.so'\n",
-                        "      }\n").as_bytes())?;
+        f.write_all(concat!("      packagingOptions {\n",
+                            "        doNotStrip '**.so'\n",
+                            "      }\n").as_bytes())?;
       },
       "Release" => {
-        f.write(concat!("      minifyEnabled true\n",
-                        "      proguardFiles getDefaultProguardFile('proguard-android.txt'),",
-                        " 'proguard-rules.pro'\n").as_bytes())?;
+        f.write_all(concat!("      minifyEnabled true\n",
+                            "      proguardFiles getDefaultProguardFile('proguard-android.txt'),",
+                            " 'proguard-rules.pro'\n").as_bytes())?;
       },
       _ => {}
     }
 
-    f.write(b"    }\n")?;
+    f.write_all(b"    }\n")?;
   }
 
-  f.write(b"  }\n")?;
+  f.write_all(b"  }\n")?;
 
   // TODO productFlavors
   // TODO buildVariants
@@ -122,7 +122,7 @@ fn write_target_build(ctx: &Context, build: &Build) -> IO {
   // TODO splits
   // TODO lintOptions
 
-  f.write(b"}\n")?;
+  f.write_all(b"}\n")?;
 
   // TODO dependencies
 
@@ -137,24 +137,24 @@ fn write_target_build(ctx: &Context, build: &Build) -> IO {
 
 fn write_root_build(ctx: &Context) -> IO {
   let mut f = File::create(ctx.build_dir.join("build.gradle"))?;
-  f.write(concat!("buildscript {\n",
-                  "  repositories {\n",
-                  "    google()\n",
-                  "    jcenter()\n",
-                  "  }\n\n",
-                  "  dependencies {\n",
-                  "    classpath 'com.android.tools.build:gradle:3.5.0'\n",
-                  "  }\n",
-                  "}\n\n",
-                  "allprojects {\n",
-                  "  repositories {\n",
-                  "    google()\n",
-                  "    jcenter()\n",
-                  "  }\n",
-                  "}\n\n",
-                  "task clean(type: Delete) {\n",
-                  "  delete rootProject.buildDir\n",
-                  "}\n").as_bytes())?;
+  f.write_all(concat!("buildscript {\n",
+                      "  repositories {\n",
+                      "    google()\n",
+                      "    jcenter()\n",
+                      "  }\n\n",
+                      "  dependencies {\n",
+                      "    classpath 'com.android.tools.build:gradle:3.5.0'\n",
+                      "  }\n",
+                      "}\n\n",
+                      "allprojects {\n",
+                      "  repositories {\n",
+                      "    google()\n",
+                      "    jcenter()\n",
+                      "  }\n",
+                      "}\n\n",
+                      "task clean(type: Delete) {\n",
+                      "  delete rootProject.buildDir\n",
+                      "}\n").as_bytes())?;
 
   f.flush()?;
   Ok(())
@@ -162,13 +162,13 @@ fn write_root_build(ctx: &Context) -> IO {
 
 fn write_properties(ctx: &Context) -> IO {
   let mut f = File::create(ctx.build_dir.join("gradle.properties"))?;
-  f.write(b"org.gradle.jvmargs=-Xmx8g\n")?;
+  f.write_all(b"org.gradle.jvmargs=-Xmx8g\n")?;
   Ok(())
 }
 
-fn write_settings(ctx: &Context, builds: &Vec<Build>) -> IO {
+fn write_settings(ctx: &Context, builds: &[Build]) -> IO {
   let mut f = BufWriter::new(File::create(ctx.build_dir.join("settings.gradle"))?);
-  f.write(b"include ")?;
+  f.write_all(b"include ")?;
 
   let mut iter = builds.iter();
   write!(f, "':{}'", iter.next().unwrap().path)?;
@@ -177,7 +177,7 @@ fn write_settings(ctx: &Context, builds: &Vec<Build>) -> IO {
     write!(f, ", ':{}'", build.path)?;
   }
 
-  f.write(b"\n")?;
+  f.write_all(b"\n")?;
   f.flush()?;
   Ok(())
 }
@@ -202,7 +202,7 @@ fn write_target_manifest(ctx: &Context, path: &Path, build: &Build) -> IO {
                           ("android.hardware.vulkan.version", "0x400003")];
 
   let mut f = BufWriter::new(File::create(path.join("AndroidManifest.xml"))?);
-  f.write(XML_DECL)?;
+  f.write_all(XML_DECL)?;
 
   write!(f, concat!("<manifest\n",
                     "    xmlns:android=\"http://schemas.android.com/apk/res/android\"\n",
@@ -272,8 +272,8 @@ fn write_strings(ctx: &Context, path: &Path) -> IO {
   res.push("string.xml");
 
   let mut f = BufWriter::new(File::create(res)?);
-  f.write(XML_DECL)?;
-  f.write(b"<resources>\n")?;
+  f.write_all(XML_DECL)?;
+  f.write_all(b"<resources>\n")?;
 
   // TODO more strings? TODO from target, not project
   let strings = [("app_label",       ctx.project.name),
@@ -283,7 +283,7 @@ fn write_strings(ctx: &Context, path: &Path) -> IO {
     write!(f, "  <string name=\"{}\">{}</string>\n", name, value)?;
   }
 
-  f.write(b"</resources>\n")?;
+  f.write_all(b"</resources>\n")?;
   f.flush()?;
   Ok(())
 }
@@ -319,7 +319,12 @@ fn write_mipmaps(ctx: &Context, path: &Path, build: &Build) -> IO {
         std::fs::remove_file(&res)?;
       }
 
-      std::os::unix::fs::symlink(src.join(&asset.path), &res)?; // TODO copy on windows
+      #[cfg(unix)]
+      std::os::unix::fs::symlink(src.join(&asset.path), &res)?;
+
+      // TODO
+      // #[cfg(windows)]
+      // std::os::windows::fs::symlink_file(src.join(&asset.path), &res)?;
     }
   }
 
@@ -337,7 +342,7 @@ fn write_mipmaps(ctx: &Context, path: &Path, build: &Build) -> IO {
 
 fn write_adaptive_icon(path: &Path, background: &str, foreground: &str) -> IO {
   let mut f = File::create(path)?;
-  f.write(XML_DECL)?;
+  f.write_all(XML_DECL)?;
 
   write!(f, concat!("<adaptive-icon xmlns:android=\"http://schemas.android.com/apk/res/android\">\n",
                     "  <background android:drawable=\"{}\" />\n",

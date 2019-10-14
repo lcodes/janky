@@ -10,9 +10,13 @@ impl Command for Gen {
   }
 
   fn run(&self, ctx: &Context) -> RunResult {
+    #[cfg(unix)]
     for (_, g) in &ctx.generators {
       g.run(ctx)?;
     }
+    // TODO get all generators to work on windows
+    #[cfg(windows)]
+    ctx.generators["vs"].run(ctx)?;
     Ok(())
   }
 }

@@ -1,4 +1,5 @@
 #![allow(clippy::cognitive_complexity)]
+#![allow(clippy::match_bool)]
 #![allow(clippy::write_with_newline)]
 
 #![cfg_attr(debug_assertions, allow(dead_code))]
@@ -200,10 +201,23 @@ fn find_all_files<'a, F>(input_dir: &PathBuf,
 }
 
 fn find_files(dir: &PathBuf, patterns: &[&str]) -> ctx::DynResult<ctx::TargetFiles> {
+  let mut sep_buf = [0; 2]; // FIXME there has to be a better way
+  let sep = std::path::MAIN_SEPARATOR.encode_utf8(&mut sep_buf);
+
+  // FIXME: ugly hack because glob() does not handle windows verbatim paths
+  #[cfg(windows)]      let prefix = &dir.to_str().unwrap()[4..];
+  #[cfg(not(windows))] let prefix = dir.to_str().unwrap();
+  #[cfg(windows)]      let prefix_path = PathBuf::from(prefix);
+  #[cfg(not(windows))] let prefix_path = dir;
+
   let mut files = Vec::new();
   for pattern in patterns {
-    for m in glob::glob(dir.join(pattern).to_str().unwrap())? {
-      let path = PathBuf::from(m?.strip_prefix(dir)?);
+    #[cfg(windows)]      let fixed_pattern = pattern.replace("/", "\\");
+    #[cfg(windows)]      let pattern_str = &fixed_pattern;
+    #[cfg(not(windows))] let pattern_str = pattern;
+
+    for m in glob::glob(&[prefix, sep, pattern_str].join(""))? {
+      let path = PathBuf::from(m?.strip_prefix(&prefix_path)?);
       let meta = std::fs::metadata(dir.join(&path))?;
       files.push(ctx::FileInfo { path, meta });
     }

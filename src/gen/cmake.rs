@@ -33,9 +33,8 @@ impl Generator for CMake {
           false => None,
           true  => {
             Some(Build {
-              name, target, index,
-              platform: platform,
-              path:     [name, "_", platform.to_str()].join("")
+              name, target, index, platform,
+              path: [name, "_", platform.to_str()].join("")
             })
           }
         }
@@ -151,11 +150,11 @@ fn write_lists_txt(ctx: &Context, build: &Build, info: &TargetInfo) -> IO {
          cmake_version, build.name)?;
 
   if build.platform == PlatformType::HTML5 {
-    f.write(concat!("if (NOT ${CMAKE_SYSTEM_NAME} MATCHES \"Emscripten\")\n",
-                    "  message(FATAL_ERROR \"Failed to detect Emscripten: run with 'emcmake cmake .'\")\n",
-                    "endif ()\n\n",
-                    "set(CMAKE_EXECUTABLE_SUFFIX \".html\")\n",
-                    "set(CMAKE_RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}/dist\")\n\n"
+    f.write_all(concat!("if (NOT ${CMAKE_SYSTEM_NAME} MATCHES \"Emscripten\")\n",
+                        "  message(FATAL_ERROR \"Failed to detect Emscripten: run with 'emcmake cmake .'\")\n",
+                        "endif ()\n\n",
+                        "set(CMAKE_EXECUTABLE_SUFFIX \".html\")\n",
+                        "set(CMAKE_RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}/dist\")\n\n"
     ).as_bytes())?;
 
     // TODO hardcoded
