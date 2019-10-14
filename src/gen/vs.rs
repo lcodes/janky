@@ -166,7 +166,11 @@ fn get_arch_platform(arch: Architecture) -> &'static str {
   }
 }
 
-fn get_item_group_element(file: &FileInfo) -> &'static str {
+fn get_item_group_element(target: &Target, file: &FileInfo) -> &'static str {
+  if !target.match_file(&file.path, PlatformType::Windows) {
+    return "None";
+  }
+
   // TODO more types (ie image)
   match file.extension() {
     "h" | "hpp" => "ClInclude",
@@ -201,13 +205,14 @@ fn write_filters(ctx: &Context, index: usize, proj: &Proj) -> IO {
   f.write_all(concat!("  </ItemGroup>\r\n",
                       "  <ItemGroup>\r\n").as_bytes())?;
 
+  let target = proj.target.unwrap();
   let prefix = ctx.input_rel.to_str().unwrap();
   for file in files.iter().filter(|x| x.meta.is_file()) {
     if let Some(filter) = file.path.parent() {
       write!(f, concat!("    <{element} Include=\"{prefix}\\{include}\">\r\n",
                         "      <Filter>{filter}</Filter>\r\n",
                         "    </{element}>\r\n"),
-             element = get_item_group_element(file),
+             element = get_item_group_element(target, file),
              prefix  = prefix,
              include = file.to_str(),
              filter  = filter.to_str().unwrap())?;
@@ -385,6 +390,7 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
 
   // TODO per file settings? (at least create PCH)
   f.write_all(b"  <ItemGroup>\r\n")?;
+  let target = proj.target.unwrap();
   match proj.kind {
     ProjKind::Android => {
 
@@ -392,7 +398,7 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
     ProjKind::CXX => {
       for file in files.iter().filter(|x| x.meta.is_file()) {
         write!(f, "    <{} Include=\"{}\\{}\" />\r\n",
-               get_item_group_element(file), prefix, file.to_str())?;
+               get_item_group_element(target, file), prefix, file.to_str())?;
       }
     },
     ProjKind::Items => unreachable!()

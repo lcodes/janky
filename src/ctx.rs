@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_repr::Deserialize_repr;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub struct StrError(pub String);
@@ -240,6 +240,18 @@ pub struct Target<'a> {
 
   #[serde(default)]
   pub profiles: Profiles<'a>,
+
+  #[serde(default)]
+  pub filters: HashMap<PathBuf, Vec<PlatformType>>
+}
+
+impl Target<'_> {
+  pub fn match_file(&self, file: &Path, platform: PlatformType) -> bool {
+    match self.filters.get(file.parent().unwrap()) {
+      None    => true,
+      Some(f) => f.contains(&platform)
+    }
+  }
 }
 
 #[derive(Debug, Deserialize)]
