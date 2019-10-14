@@ -1216,7 +1216,9 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
       // Generate the build files for this target.
       for file_info in target_files {
-        if file_info.meta.is_dir() {continue} // TODO
+        if file_info.meta.is_dir() || !target.match_file(&file_info.path, platform) {
+          continue;
+        }
         let name = file_info.name();
         let file = &file_stats[&file_info.path];
 
