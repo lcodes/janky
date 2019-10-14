@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::fs::{File, create_dir_all};
 use std::io::{BufWriter, Write};
 
@@ -23,12 +22,8 @@ impl Generator for CMake {
       return Ok(());
     }
 
-    let input_rel    = ctx.input_rel.join("..");
-    let mut sources  = Vec::with_capacity(ctx.sources.len());
-    let mut includes = Vec::with_capacity(ctx.sources.len());
-
     let targets = ctx.project.targets.iter().enumerate().map(|(index, (name, target))| {
-      let builds = PLATFORMS.iter().map(move |&platform| {
+      PLATFORMS.iter().map(move |&platform| {
         match target.filter.matches_platform(platform) {
           false => None,
           true  => {
@@ -38,41 +33,11 @@ impl Generator for CMake {
             })
           }
         }
-      }).flatten().collect::<Vec<Build>>();
-
-      let mut s = String::new();
-      let mut i = String::new();
-      if !builds.is_empty() {
-        for src in ctx.sources[index].iter().filter(|x| x.is_source_no_objc()) {
-          s.push_str("  ");
-          s.push_str(input_rel.join(&src.path).to_str().unwrap());
-          s.push('\n');
-        };
-
-        let mut incs = Vec::new();
-        for inc in ctx.sources[index].iter().filter(|x| x.is_header()) {
-          incs.push(inc.path.parent().unwrap());
-        }
-
-        incs.dedup();
-
-        for inc in incs {
-          i.push_str("  ");
-          i.push_str(input_rel.join(inc).to_str().unwrap());
-          i.push('\n');
-        }
-      }
-
-      sources.push(s);
-      includes.push(i);
-      builds
-    }).flatten().collect::<Vec<Build>>();
+      }).flatten()
+    }).flatten();
 
     for build in targets {
-      write_lists_txt(ctx, &build, &TargetInfo {
-        sources:  &sources[build.index],
-        includes: &includes[build.index]
-      })?;
+      write_lists_txt(ctx, &build)?;
     }
 
     Ok(())
@@ -80,11 +45,6 @@ impl Generator for CMake {
 }
 
 type IO = std::io::Result<()>;
-
-struct TargetInfo<'a> {
-  sources:  &'a String,
-  includes: &'a String
-}
 
 struct Build<'a> {
   index:    usize,
@@ -94,7 +54,7 @@ struct Build<'a> {
   platform: PlatformType
 }
 
-fn write_lists_txt(ctx: &Context, build: &Build, info: &TargetInfo) -> IO {
+fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
   let mut f = BufWriter::new(File::create({
     let mut path = ctx.build_dir.join(&build.path);
     create_dir_all(&path)?;
@@ -114,19 +74,16 @@ fn write_lists_txt(ctx: &Context, build: &Build, info: &TargetInfo) -> IO {
     _ => unreachable!()
   };
 
-  let sources: Cow<'_, str> = match build.platform { // TODO dont hardcode
-    PlatformType::Android =>
-      Cow::Owned([info.sources,
-                  "  ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c\n"].join("")),
-    _ => Cow::Borrowed(&info.sources)
+  let sources = match build.platform { // TODO dont hardcode
+    PlatformType::Android => "  ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c\n",
+    _ => ""
   };
 
-  let includes: Cow<'_, str> = match build.platform { // TODO dont hardcode
+  let includes = match build.platform { // TODO dont hardcode
     PlatformType::Android =>
-      Cow::Owned([info.includes,
-                  concat!("  ${ANDROID_NDK}/sources/android/native_app_glue\n",
-                          "  ${ANDROID_NDK}/sources/third_party/shaderc/include\n")].join("")),
-    _ => Cow::Borrowed(&info.includes)
+      concat!("  ${ANDROID_NDK}/sources/android/native_app_glue\n",
+              "  ${ANDROID_NDK}/sources/third_party/shaderc/include\n"),
+    _ => ""
   };
 
   let libraries = match build.platform { // TODO dont hardcode
@@ -168,6 +125,21 @@ fn write_lists_txt(ctx: &Context, build: &Build, info: &TargetInfo) -> IO {
     write!(f, "set(CMAKE_EXE_LINKER_FLAGS \"${{CMAKE_EXE_LINKER_FLAGS}}{}\")\n\n", flags)?;
   }
 
+  let rel    = ctx.input_rel.join("..");
+  let prefix = rel.to_str().unwrap();
+  let files  = &ctx.sources[build.index];
+
+  let srcs = files.iter().filter(|x| {
+    x.is_source_no_objc() && build.target.match_file(&x.path, build.platform)
+  });
+
+  let mut incs = files.iter().filter(|x| {
+    x.is_header() && build.target.match_file(&x.path, build.platform)
+  }).map(|x| x.path.parent().unwrap().to_str().unwrap())
+    .collect::<Vec<&str>>();
+
+  incs.dedup();
+
   // TODO hardcoded flags
   let flags         = "-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti";
   let release_flags = "-Werror";
@@ -175,27 +147,37 @@ fn write_lists_txt(ctx: &Context, build: &Build, info: &TargetInfo) -> IO {
                     "set(CMAKE_CXX_FLAGS_MINSIZEREL \"{release_flags}\")\n",
                     "set(CMAKE_CXX_FLAGS_RELWITHDEBINFO \"{release_flags}\")\n",
                     "set(CMAKE_CXX_FLAGS_RELEASE \"{release_flags}\")\n\n",
-                    "add_{target_type}({target_name}{target_subtype}\n",
-                    "{sources}",
-                    "  )\n\n",
+                    "add_{target_type}({target_name}{target_subtype}\n"),
+         flags          = flags,
+         release_flags  = release_flags,
+         target_name    = build.name,
+         target_type    = target_type,
+         target_subtype = target_subtype)?;
+
+  for src in srcs {
+    write!(f, "  {}/{}\n", prefix, src.to_str())?;
+  }
+  f.write_all(sources.as_bytes())?;
+
+  write!(f, concat!("  )\n\n",
                     "set_target_properties({target_name} PROPERTIES\n",
                     "  CXX_STANDARD 17\n",
                     "  CXX_STANDARD_REQUIRED YES\n",
                     "  CXX_EXTENSIONS NO\n",
                     "  )\n\n",
-                    "target_include_directories({target_name} PRIVATE\n",
-                    "{includes}",
-                    "  )\n\n",
+                    "target_include_directories({target_name} PRIVATE\n"),
+         target_name = build.name)?;
+
+  for src in incs {
+    write!(f, "  {}/{}\n", prefix, src)?;
+  }
+  f.write_all(includes.as_bytes())?;
+
+  write!(f, concat!("  )\n\n",
                     "target_link_libraries({target_name} PRIVATE\n",
                     "{libraries}",
                     "  )\n"),
-         flags          = flags,
-         release_flags  = release_flags,
          target_name    = build.name,
-         target_type    = target_type,
-         target_subtype = target_subtype,
-         sources        = sources,
-         includes       = includes,
          libraries      = libraries)?;
 
   f.flush()?;
