@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufWriter, Result as IOResult, Write};
+use std::path::Path;
 use uuid::Uuid;
 
-use crate::ctx::{Architecture, Context, Generator, FileInfo, PlatformType, RunResult, Target};
+use crate::ctx::{Architecture, Context, Generator, FileInfo,
+                 PlatformType, RunResult, Target};
 
 pub struct VisualStudio;
 
@@ -19,22 +20,35 @@ impl Generator for VisualStudio {
   }
 
   fn run(&self, ctx: &Context) -> RunResult {
-    let tools = Tools::new(Version::VS2019); // TODO configure
-    let projs = ctx.project.targets
-      .iter()
-      .map(|kv| Proj::new(kv, &ctx.build_dir))
-      .collect::<Vec<Proj>>();
+    let     tools = Tools::new(Version::VS2019); // TODO configure
+    let mut projs = Vec::with_capacity(ctx.project.targets.len() + 1);
 
-    for (i, proj) in projs.iter().enumerate() {
-      write_proj(ctx, &tools, i, proj)?;
-      write_filters(ctx, &tools, i, proj)?;
+    projs.push(Proj {
+      kind:   ProjKind::Items,
+      uuid:   random_uuid(),
+      name:   ctx.project.name,
+      target: None
+    });
+
+    projs.extend(ctx.project.targets.iter().map(|(name, target)| { Proj {
+      kind:   ProjKind::CXX,
+      uuid:   random_uuid(),
+      name:   name,
+      target: Some(target)
+    }}));
+
+    for (i, proj) in projs.iter().skip(1).enumerate() {
+      write_proj   (ctx, i, proj, &tools)?;
+      write_filters(ctx, i, proj)?;
     }
-    write_sln(ctx, &tools, &projs)?;
+
+    write_items(ctx, &projs[0])?;
+    write_sln  (ctx, &projs, &tools)?;
     Ok(())
   }
 }
 
-type IO = std::io::Result<()>;
+type IO = IOResult<()>;
 
 const ARCHITECTURES: &[Architecture] = &[ // TODO derive from project
   // Architecture::ARM, // TODO only when using the android toolchain
@@ -53,85 +67,69 @@ enum Version {
 struct Tools {
   version:       Version,
   version_major: &'static str,
-  version_extra: &'static str,
-  xmlns:         &'static str
+  version_extra: &'static str
 }
 
 impl Tools {
   fn new(version: Version) -> Self {
-    let version_major = match version {
-      Version::VS2015 => "14",
-      Version::VS2017 => "15",
-      Version::VS2019 => "16"
-    };
-    let version_extra = match version {
-      Version::VS2015 => "0.23107.0",
-      Version::VS2017 => "2.26430.4",
-      Version::VS2019 => "0.28729.10"
-    };
     Tools {
       version,
-      version_major,
-      version_extra,
-      xmlns: "http://schemas.microsoft.com/developer/msbuild/2003"
+      version_major: match version {
+        Version::VS2015 => "14",
+        Version::VS2017 => "15",
+        Version::VS2019 => "16"
+      },
+      version_extra: match version {
+        Version::VS2015 => "0.23107.0",
+        Version::VS2017 => "2.26430.4",
+        Version::VS2019 => "0.28729.10"
+      }
     }
   }
-
-  fn write_file_header<W>(&self, f: &mut W) -> IO where W: Write {
-    write!(f, concat!(r#"<?xml version="1.0" encoding="utf-8"?>"#, "\r\n",
-                      "<Project xmlns=\"{}\"",
-                      // r#"<Project DefaultTargets="Build""#,
-                      // r#" ToolsVersion="{}.0" xmlns="{}""#,
-                      ">\r\n"),
-           // self.version_major,
-           self.xmlns)?;
-    Ok(())
-  }
 }
 
-fn random_uuid() -> String {
-  Uuid::new_v4().to_string().to_uppercase()
-}
-
+#[derive(PartialEq)]
 enum ProjKind {
   Android,
-  CXX
+  CXX,
+  Items
 }
 
 struct Proj<'a> {
-  target:    &'a Target<'a>,
-  name:      &'a str,
-  kind:      ProjKind,
-  path:      PathBuf,
-  uuid:      String,
-  is_folder: bool
+  kind:   ProjKind,
+  uuid:   String,
+  name:   &'a str,
+  target: Option<&'a Target<'a>>
 }
 
 impl<'a> Proj<'a> {
-  fn new((name, target): (&&'a str, &'a Target<'a>), build_dir: &Path) -> Self {
-    let kind = ProjKind::CXX; // TODO
-    let mut path = build_dir.join(name);
-    path.set_extension(match kind {
+  fn ext(&self) -> &'static str {
+    match self.kind {
       ProjKind::Android => "androidproj",
-      ProjKind::CXX     => "vcxproj"
-    });
-
-    Proj {
-      target, name, kind, path,
-      uuid:      random_uuid(),
-      is_folder: false
+      ProjKind::CXX     => "vcxproj",
+      ProjKind::Items   => "vcxitems"
     }
   }
 
+  fn create(&self, base: &Path, ext: &str) -> IOResult<BufWriter<File>> {
+    let mut path = base.join(self.name);
+    path.set_extension(ext);
+
+    let mut f = BufWriter::new(File::create(&path)?);
+    f.write_all(concat!(
+      "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n",
+      "<Project xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\r\n"
+    ).as_bytes())?;
+
+    Ok(f)
+  }
+
   fn get_kind_guid(&self) -> &str {
-    if self.is_folder {
-      "2150E333-8FDC-42A3-9474-1A3956D46DE8"
-    }
-    else {
-      match self.kind {
-        ProjKind::Android => "39E2626F-3545-4960-A6E8-258AD8476CE5",
-        ProjKind::CXX     => "8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942"
-      }
+    // TODO use solution folders? GUID = "2150E333-8FDC-42A3-9474-1A3956D46DE8"
+    match self.kind {
+      ProjKind::Android => "39E2626F-3545-4960-A6E8-258AD8476CE5",
+      ProjKind::Items   |
+      ProjKind::CXX     => "8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942"
     }
   }
 
@@ -142,8 +140,29 @@ impl<'a> Proj<'a> {
         Version::VS2015 => "", // TODO
         Version::VS2017 => "v141",
         Version::VS2019 => "v142"
-      }
+      },
+      ProjKind::Items   => unreachable!()
     }
+  }
+}
+
+fn get_arch_name(arch: Architecture) -> &'static str {
+  match arch {
+    Architecture::Any   => unreachable!(),
+    Architecture::ARM   => "ARM",
+    Architecture::ARM64 => "ARM64",
+    Architecture::X86   => "x86",
+    Architecture::X64   => "x64"
+  }
+}
+
+fn get_arch_platform(arch: Architecture) -> &'static str {
+  match arch {
+    Architecture::Any   => unreachable!(),
+    Architecture::ARM   => "ARM",
+    Architecture::ARM64 => "ARM64",
+    Architecture::X86   => "Win32",
+    Architecture::X64   => "x64"
   }
 }
 
@@ -153,36 +172,30 @@ fn get_item_group_element(file: &FileInfo) -> &'static str {
     "h" | "hpp" => "ClInclude",
     "c" | "cpp" => "ClCompile",
     "xml"       => "Xml",
-    _           => "Text"
+    _           => "None"
   }
 }
 
-fn write_filter_dir<'a, W>(f: &mut W, set: &mut HashSet<&'a Path>, path: &'a Path) -> IO where W: Write {
-  if let Some(p) = path.parent() {
-    if !p.to_str().unwrap().is_empty() && !set.contains(p) {
-      set.insert(p);
-      write_filter_dir(f, set, p)?;
-    }
-  }
-
-  write!(f, concat!("    <Filter Include=\"{dir}\">\r\n",
-                    "      <UniqueIdentifier>{{{uuid}}}</UniqueIdentifier>\r\n",
-                    "    </Filter>\r\n"),
-         dir  = path.to_str().unwrap(),
-         uuid = random_uuid())?;
-  Ok(())
+fn random_uuid() -> String {
+  Uuid::new_v4().to_string().to_uppercase()
 }
 
-fn write_filters(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
-  let mut f = BufWriter::new(File::create(proj.path.with_extension("vcxproj.filters"))?); // TODO androidproj ?
-  tools.write_file_header(&mut f)?;
+
+// Filter File
+// -----------------------------------------------------------------------------
+
+fn write_filters(ctx: &Context, index: usize, proj: &Proj) -> IO {
+  assert!(proj.kind == ProjKind::CXX);
+
+  let mut f = proj.create(&ctx.build_dir, "vcxproj.filters")?;
   f.write_all(b"  <ItemGroup>\r\n")?;
 
-  let mut dir_set = HashSet::new();
-
   let files = &ctx.sources[index];
-  for dir in files.iter().filter(|x| x.meta.is_dir()) {
-    write_filter_dir(&mut f, &mut dir_set, &dir.path)?;
+  {
+    let mut dir_set = HashSet::new();
+    for dir in files.iter().filter(|x| x.meta.is_dir()) {
+      write_filter_dir(&mut f, &mut dir_set, &dir.path)?;
+    }
   }
 
   f.write_all(concat!("  </ItemGroup>\r\n",
@@ -208,9 +221,34 @@ fn write_filters(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO 
   Ok(())
 }
 
-fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
-  let mut f = BufWriter::new(File::create(&proj.path)?);
-  tools.write_file_header(&mut f)?;
+fn write_filter_dir<'a, W>(f:    &mut W,
+                           set:  &mut HashSet<&'a Path>,
+                           path: &'a Path) -> IO where
+  W: Write
+{
+  if let Some(p) = path.parent() {
+    // FIXME: better way to test empty path than getting a string slice?
+    if !p.to_str().unwrap().is_empty() && !set.contains(p) {
+      set.insert(p);
+      write_filter_dir(f, set, p)?;
+    }
+  }
+
+  write!(f, concat!("    <Filter Include=\"{dir}\">\r\n",
+                    "      <UniqueIdentifier>{{{uuid}}}</UniqueIdentifier>\r\n",
+                    "    </Filter>\r\n"),
+         dir  = path.to_str().unwrap(),
+         uuid = random_uuid())?;
+
+  Ok(())
+}
+
+
+// C++ Project File
+// -----------------------------------------------------------------------------
+
+fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
+  let mut f = proj.create(&ctx.build_dir, proj.ext())?;
 
   f.write_all(b"  <ItemGroup Label=\"ProjectConfigurations\">\r\n")?;
   for arch in ARCHITECTURES {
@@ -235,7 +273,8 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
 
   write_proj_import(&mut f, match proj.kind {
     ProjKind::Android => r#"$(AndroidTargetsPath)\Android.Default.props"#,
-    ProjKind::CXX     => r#"$(VCTargetsPath)\Microsoft.Cpp.Default.props"#
+    ProjKind::CXX     => r#"$(VCTargetsPath)\Microsoft.Cpp.Default.props"#,
+    ProjKind::Items   => unreachable!()
   })?;
 
   write!(f, concat!("  <PropertyGroup Label=\"Configuration\">\r\n",
@@ -264,7 +303,8 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
 
   write_proj_import(&mut f, match proj.kind {
     ProjKind::Android => r#"$(AndroidTargetsPath)\Android.props"#,
-    ProjKind::CXX     => r#"$(VCTargetsPath)\Microsoft.Cpp.props"#
+    ProjKind::CXX     => r#"$(VCTargetsPath)\Microsoft.Cpp.props"#,
+    ProjKind::Items   => unreachable!()
   })?;
   f.write_all(b"  <ImportGroup Label=\"ExtensionSettings\">\r\n  </ImportGroup>\r\n")?;
   f.write_all(b"  <ImportGroup Label=\"Shared\">\r\n  </ImportGroup>\r\n")?;
@@ -354,7 +394,8 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
         write!(f, "    <{} Include=\"{}\\{}\" />\r\n",
                get_item_group_element(file), prefix, file.to_str())?;
       }
-    }
+    },
+    ProjKind::Items => unreachable!()
   }
   f.write_all(b"  </ItemGroup>\r\n")?;
 
@@ -365,7 +406,8 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
 
   write_proj_import(&mut f, match proj.kind {
     ProjKind::Android => r#"$(AndroidTargetsPath)\Android.targets"#,
-    ProjKind::CXX     => r#"$(VCTargetsPath)\Microsoft.Cpp.Targets"#
+    ProjKind::CXX     => r#"$(VCTargetsPath)\Microsoft.Cpp.Targets"#,
+    ProjKind::Items   => unreachable!()
   })?;
   f.write_all(b"  <ImportGroup Label=\"ExtensionTargets\" />\r\n")?;
 
@@ -377,7 +419,35 @@ fn write_proj(ctx: &Context, tools: &Tools, index: usize, proj: &Proj) -> IO {
   Ok(())
 }
 
-fn write_sln(ctx: &Context, tools: &Tools, projs: &[Proj]) -> IO {
+
+// Items Project File
+// -----------------------------------------------------------------------------
+
+fn write_items(ctx: &Context, proj: &Proj) -> IO {
+  let mut f = proj.create(&ctx.build_dir, proj.ext())?;
+  write!(f, concat!("  <PropertyGroup Label=\"Globals\">\r\n",
+                    "    <ItemsProjectGuid>{{{}}}</ItemsProjectGuid>\r\n",
+                    "  </PropertyGroup>\r\n",
+                    "  <ItemGroup>\r\n"),
+         proj.uuid)?;
+
+  let path = ctx.input_rel.to_str().unwrap();
+  for file in ctx.metafiles.iter().filter(|x| x.meta.is_file()) {
+    write!(f, "    <None Include=\"$(MSBuildThisFileDirectory){}\\{}\" />\r\n",
+           path, file.name())?;
+  }
+
+  f.write_all(concat!("  </ItemGroup>\r\n",
+                      "</Project>\r\n").as_bytes())?;
+  f.flush()?;
+  Ok(())
+}
+
+
+// Solution File
+// -----------------------------------------------------------------------------
+
+fn write_sln(ctx: &Context, projs: &[Proj], tools: &Tools) -> IO {
   let mut f = BufWriter::new(File::create({
     let mut path = ctx.build_dir.join(&ctx.project.name);
     path.set_extension("sln");
@@ -392,15 +462,22 @@ fn write_sln(ctx: &Context, tools: &Tools, projs: &[Proj]) -> IO {
          tools.version_major,
          tools.version_extra)?;
 
+  let path = ctx.build_dir.to_str().unwrap();
   for proj in projs {
-    write!(f, concat!(r#"Project("{{{}}}") = "{}", "{}", "{{{}}}""#, "\r\n"),
-           proj.get_kind_guid(),
-           proj.name,
-           proj.path.file_name().unwrap().to_str().unwrap(),
-           proj.uuid)?;
-    for dep in &proj.target.depends {
-      // TODO
+    write!(f, concat!(r#"Project("{{{kind}}}") = "{name}", "#,
+                      r#""{path}\\{name}.{ext}", "{{{uuid}}}""#, "\r\n"),
+           kind = proj.get_kind_guid(),
+           path = path,
+           name = proj.name,
+           ext  = proj.ext(),
+           uuid = proj.uuid)?;
+
+    if let Some(target) = proj.target {
+      for dep in &target.depends {
+        // TODO
+      }
     }
+
     f.write_all(b"EndProject\r\n")?;
   }
 
@@ -457,24 +534,4 @@ fn write_sln_config<W>(f: &mut W, uuid: &str, prof: &str, arch: Architecture,
          profile  = prof,
          arch     = get_arch_name(arch),
          platform = get_arch_platform(arch))
-}
-
-fn get_arch_name(arch: Architecture) -> &'static str {
-  match arch {
-    Architecture::Any   => unreachable!(),
-    Architecture::ARM   => "ARM",
-    Architecture::ARM64 => "ARM64",
-    Architecture::X86   => "x86",
-    Architecture::X64   => "x64"
-  }
-}
-
-fn get_arch_platform(arch: Architecture) -> &'static str {
-  match arch {
-    Architecture::Any   => unreachable!(),
-    Architecture::ARM   => "ARM",
-    Architecture::ARM64 => "ARM64",
-    Architecture::X86   => "Win32",
-    Architecture::X64   => "x64"
-  }
 }
