@@ -53,7 +53,8 @@ type IO = IOResult<()>;
 const ARCHITECTURES: &[Architecture] = &[ // TODO derive from project
   // Architecture::ARM, // TODO only when using the android toolchain
   // Architecture::ARM64,
-  Architecture::X86,
+  // Architecture::X86, // TODO keep generated GUIDs across generations
+                        //      to prevent user selections from resetting
   Architecture::X64
 ];
 
@@ -339,7 +340,7 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
                     // TODO disable exceptions
                     "      <CompileAsManaged>false</CompileAsManaged>\r\n",
                     "      <DisableSpecificWarnings>{warnings}</DisableSpecificWarnings>\r\n",
-                    "      <AdditionalIncludeDirectories>\r\n"),
+                    "      <AdditionalIncludeDirectories>"),
          warnings = disable_warnings)?;
 
   let files = &ctx.sources[index];
@@ -355,14 +356,25 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
     }
   }
 
+  // TODO hardcoded
+  f.write_all(b"..\\external\\EGL-Registry\\api;")?;
+  f.write_all(b"..\\external\\OpenGL-Registry\\api;")?;
+
   write!(f, concat!("%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>\r\n",
                     "      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>\r\n",
+                    "      <AdditionalOptions>/experimental:preprocessor %(AdditionalOptions)</AdditionalOptions>\r\n",
                     "    </ClCompile>\r\n",
                     "    <Link>\r\n",
-                    "      <SubSystem>{subsystem}</SubSystem>",
-                    "    </Link>\r\n",
-                    "  </ItemDefinitionGroup>\r\n"),
+                    "      <SubSystem>{subsystem}</SubSystem>\r\n",
+                    "      <AdditionalDependencies>"),
          subsystem = "Windows")?;
+
+  // TODO hardcoded
+  f.write_all(b"OpenGL32.lib;")?;
+
+  f.write_all(concat!("%(AdditionalDependencies)</AdditionalDependencies>\r\n",
+                      "    </Link>\r\n",
+                      "  </ItemDefinitionGroup>\r\n").as_bytes())?;
 
   // TODO hardcoded
   for prof in &ctx.profiles {
