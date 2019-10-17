@@ -222,6 +222,8 @@ fn write_target_manifest(ctx: &Context, path: &Path, build: &Build) -> IO {
     write!(f, "  <uses-feature android:name=\"{}\" />\n", name)?;
   }
 
+  write!(f, "  <uses-feature android:name=\"android.hardware.touchscreen\" android:required=\"false\" />")?;
+
   for (name, version) in &feature_versions {
     write!(f, concat!("  <uses-feature\n",
                       "      android:name=\"{name}\"\n",

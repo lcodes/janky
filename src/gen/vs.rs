@@ -356,9 +356,10 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
     }
   }
 
-  // TODO hardcoded
-  f.write_all(b"..\\external\\EGL-Registry\\api;")?;
-  f.write_all(b"..\\external\\OpenGL-Registry\\api;")?;
+  let target = proj.target.unwrap();
+  for inc in &*target.settings.include_dirs {
+    write!(f, "{}\\{};", prefix, inc)?;
+  }
 
   write!(f, concat!("%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>\r\n",
                     "      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>\r\n",
@@ -402,7 +403,6 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
 
   // TODO per file settings? (at least create PCH)
   f.write_all(b"  <ItemGroup>\r\n")?;
-  let target = proj.target.unwrap();
   match proj.kind {
     ProjKind::Android => {
 

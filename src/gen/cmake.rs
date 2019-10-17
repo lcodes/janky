@@ -168,9 +168,14 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
                     "target_include_directories({target_name} PRIVATE\n"),
          target_name = build.name)?;
 
-  for src in incs {
-    write!(f, "  {}/{}\n", prefix, src)?;
+  for inc in incs {
+    write!(f, "  {}/{}\n", prefix, inc)?;
   }
+
+  for inc in &*build.target.settings.include_dirs {
+    write!(f, "  {}/{}\n", prefix, inc)?;
+  }
+
   f.write_all(includes.as_bytes())?;
 
   write!(f, concat!("  )\n\n",
@@ -180,6 +185,46 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
          target_name    = build.name,
          libraries      = libraries)?;
 
+  if build.platform == PlatformType::HTML5 {
+    #[cfg(unix)]
+    write_html5_shell_scripts(ctx, build)?;
+  }
+
   f.flush()?;
+  Ok(())
+}
+
+#[cfg(unix)]
+fn write_html5_shell_scripts(ctx: &Context, build: &Build) -> IO {
+  fn write_script<W>(path: &std::path::Path, w: W) -> IO where W: FnOnce(&mut File) -> IO {
+    let mut f = File::create(&path)?;
+    w(&mut f)?;
+    f.flush()?;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    Ok(())
+  }
+
+  write_script(&ctx.build_dir.join(["build_", build.name, "_HTML5.sh"].join("")), |f| {
+    write!(f, concat!("#!/bin/sh -e\n",
+                      "cd \"$(dirname \"$(readlink \"$0\")\")/{}_HTML5\"\n",
+                      "case $(uname) in\n",
+                      "  Darwin) jobs=$(sysctl machdep.cpu.thread_count | awk '{{print $2}}');;\n",
+                      "  Linux)  jobs=$(grep ^cpu\\\\scores /proc/cpuinfo | head -n 1 | awk '{{print $4}}');;\n",
+                      "  *)      jobs=4;;\n",
+                      "esac\n",
+                      "emcmake cmake .\n",
+                      "emmake make -j $jobs\n"),
+           build.name)?;
+    Ok(())
+  })?;
+
+  write_script(&ctx.build_dir.join(["run_", build.name, "_HTML5.sh"].join("")), |f| {
+    write!(f, concat!("#!/bin/sh -e\n",
+                      "emrun --no_browser --hostname 0.0.0.0 --port 8080 ",
+                      "\"$(dirname \"$(readlink \"$0\")\")/{0}_HTML5/dist/{0}.html\"\n"),
+           build.name)?;
+    Ok(())
+  })?;
+
   Ok(())
 }

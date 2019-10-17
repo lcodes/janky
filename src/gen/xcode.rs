@@ -820,6 +820,8 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
     targets.push([None, None, None, None]);
   }
 
+  let prefix = ctx.input_rel.to_str().unwrap();
+
   // Collect information about files from every target.
   // At the same time, generate the shared group and file references.
   let file_stats = {
@@ -993,8 +995,8 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
       let (sdk_source, sdk_prefix) = sdk_info(platform);
       let link_frameworks = match platform { // TODO dont hardcode
         PlatformType::WatchOS => &[] as &[&str],
-        PlatformType::MacOS   => &["AppKit", "CoreVideo", "Metal", "OpenGL"],
-        _                     => &["UIKit", "Metal", "OpenGLES", "QuartzCore"]
+        PlatformType::MacOS   => &["AppKit", "CoreVideo", "Metal", "OpenGL", "GameController"],
+        _                     => &["UIKit", "Metal", "OpenGLES", "QuartzCore", "GameController"]
       };
 
       for lf in link_frameworks {
@@ -1078,7 +1080,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
       // Generate the build configurations for this target.
       for prof in &ctx.profiles {
         let id = random_id();
-        build_cfg(&mut cfgs, &id, prof, |s| {
+        build_cfg(&mut cfgs, &id, prof, |mut s| {
           s.push_str(&settings_app_icon);
 
           if target.target_type == TargetType::Application {
@@ -1157,6 +1159,15 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
           }
 
           s.push_str("\t\t\t\t);\n");
+
+          let incs = &*target.settings.include_dirs;
+          if !incs.is_empty() {
+            s.push_str("\t\t\t\tHEADER_SEARCH_PATHS = (\n");
+            for inc in incs {
+              write!(&mut s, "\t\t\t\t\t{},\n", inc).unwrap();
+            }
+            s.push_str("\t\t\t\t);\n");
+          }
 
           if platform == PlatformType::MacOS {
             s.push_str(sdk_version);
@@ -1407,7 +1418,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
                     "\t\t\ttargets = (\n"),
          main_group_id    = main_group.id,
          product_group_id = main_group.groups.last().unwrap().id,
-         project_dir_path = quote(ctx.input_rel.to_str().unwrap()))?;
+         project_dir_path = quote(prefix))?;
 
   for data in targets.iter().flatten().flatten() {
     write!(f, "\t\t\t\t{} /* {} */,\n", data.target_id, &data.product_name)?;

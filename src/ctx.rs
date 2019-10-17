@@ -50,7 +50,7 @@ pub type Platforms  = Vec<Box<dyn Platform>>;
 pub type TargetFiles  = Vec<FileInfo>;
 pub type AllFiles     = Vec<TargetFiles>;
 pub type Profiles<'a> = HashMap<&'a str, Vec<Profile<'a>>>;
-pub type Strings<'a>  = Option<Cow<'a, [&'a str]>>;
+pub type Strings<'a>  = Cow<'a, [&'a str]>;
 
 pub struct Context<'a> {
   pub commands:   Commands,
@@ -567,29 +567,28 @@ fn merge_opt_mut<T: Copy>(a: &mut Option<T>, b: &Option<T>) {
 }
 
 fn merge_vecs_mut<'a, 'b>(a: &'b mut Strings<'a>, b: &'a Strings<'a>) where 'a: 'b {
-  match a {
-    None => if let Some(bc) = b {
-      *a = Some(Cow::Borrowed(&*bc));
-    },
-    Some(ac) => if let Some(bc) = b {
-      ac.to_mut().extend(bc.iter());
+  if a.is_empty() {
+    if !b.is_empty() {
+      *a = Cow::Borrowed(&*b);
+    }
+  }
+  else {
+    if !b.is_empty() {
+      a.to_mut().extend(b.iter());
     }
   }
 }
 
 fn merge_vecs<'a>(a: &'a Strings, b: &'a Strings) -> Strings<'a> {
-  match a {
-    None => match b {
-      None     => None,
-      Some(bc) => Some(Cow::Borrowed(&*bc))
-    },
-    Some(ac) => match b {
-      None     => Some(Cow::Borrowed(&*ac)),
-      Some(bc) => {
-        let mut v = ac.to_vec();
-        v.extend(&bc[..]);
-        Some(v.into())
-      }
-    }
+  if a.is_empty() {
+    Cow::Borrowed(&*b)
+  }
+  else if b.is_empty() {
+    Cow::Borrowed(&*a)
+  }
+  else {
+    let mut v = a.to_vec();
+    v.extend(&b[..]);
+    v.into()
   }
 }
