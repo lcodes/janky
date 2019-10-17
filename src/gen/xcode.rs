@@ -135,6 +135,10 @@ impl Generator for XCode {
   }
 }
 
+
+// Utilities
+// -----------------------------------------------------------------------------
+
 type IO = std::io::Result<()>;
 
 static NEXT_ID_PREFIX: AtomicU32 = AtomicU32::new(0);
@@ -174,6 +178,34 @@ fn quote(s: &str) -> Cow<'_, str> {
   }
 }
 
+fn get_target_ext(t: TargetType) -> &'static str {
+  match t {
+    TargetType::Auto |
+    TargetType::None |
+    TargetType::Custom        => unreachable!(),
+    TargetType::Console       => "",
+    TargetType::Application   => ".app",
+    TargetType::StaticLibrary => ".a",
+    TargetType::SharedLibrary => ".dylib"
+  }
+}
+
+fn get_file_type(ext: &'_ str) -> (Phase, &'static str) {
+  match ext {
+    "h"            => (Phase::None,     "sourcecode.c.h"),
+    "hpp"          => (Phase::None,     "sourcecode.cpp.h"),
+    "c"            => (Phase::Source,   "sourcecode.c"),
+    "cc" | "cpp"   => (Phase::Source,   "sourcecode.cpp.cpp"),
+    "m"            => (Phase::Source,   "sourcecode.c.objc"),
+    "mm"           => (Phase::Source,   "sourcecode.cpp.objcpp"),
+    "plist"        => (Phase::Resource, "text.plist.xml"),
+    "bmp"          => (Phase::None,     "image.bmp"),
+    "jpg" | "jpeg" => (Phase::None,     "image.jpeg"),
+    "xml"          => (Phase::None,     "text.xml"),
+    &_             => (Phase::None,     "text")
+  }
+}
+
 enum Phase {
   None,
   Source,
@@ -200,6 +232,10 @@ struct TargetData<'a> {
   cfg_list:     CfgList,
   build_phases: String
 }
+
+
+// PBXGroup
+// -----------------------------------------------------------------------------
 
 struct Group<'a> {
   id:       String,
@@ -300,6 +336,10 @@ impl<'a> Group<'a> {
   }
 }
 
+
+// XCConfigurationList & XCConfiguration
+// -----------------------------------------------------------------------------
+
 struct CfgList {
   id:   String,
   cfgs: String
@@ -362,33 +402,9 @@ fn build_cfg<F>(cfg: &mut String, id: &str, name: &str, f: F) where F: FnOnce(&m
          name).unwrap();
 }
 
-fn get_target_ext(t: TargetType) -> &'static str {
-  match t {
-    TargetType::Auto |
-    TargetType::None |
-    TargetType::Custom        => unreachable!(),
-    TargetType::Console       => "",
-    TargetType::Application   => ".app",
-    TargetType::StaticLibrary => ".a",
-    TargetType::SharedLibrary => ".dylib"
-  }
-}
 
-fn get_file_type(ext: &'_ str) -> (Phase, &'static str) {
-  match ext {
-    "h"            => (Phase::None,     "sourcecode.c.h"),
-    "hpp"          => (Phase::None,     "sourcecode.cpp.h"),
-    "c"            => (Phase::Source,   "sourcecode.c"),
-    "cc" | "cpp"   => (Phase::Source,   "sourcecode.cpp.cpp"),
-    "m"            => (Phase::Source,   "sourcecode.c.objc"),
-    "mm"           => (Phase::Source,   "sourcecode.cpp.objcpp"),
-    "plist"        => (Phase::Resource, "text.plist.xml"),
-    "bmp"          => (Phase::None,     "image.bmp"),
-    "jpg" | "jpeg" => (Phase::None,     "image.jpeg"),
-    "xml"          => (Phase::None,     "text.xml"),
-    &_             => (Phase::None,     "text")
-  }
-}
+// Assets
+// -----------------------------------------------------------------------------
 
 fn write_info_plist(path: &Path) -> IO {
   let mut f = File::create(path)?;
@@ -734,6 +750,10 @@ fn write_contents_json(root: &Path, path: &Path, content: &AssetContent) -> IO {
   Ok(())
 }
 
+
+// PBXFileReference
+// -----------------------------------------------------------------------------
+
 const GROUP_REF: &str = "\"<group>\"";
 
 fn write_file_ref(s: &mut String, id: &str, name: &str, path: Option<&Path>,
@@ -796,6 +816,10 @@ fn build_project_group<'a>(ctx: &Context, refs: &mut String) -> Group<'a> {
   }
   g
 }
+
+
+// PBXProj
+// -----------------------------------------------------------------------------
 
 fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   // Open the file for writing right away to bail out early on failure.
@@ -865,6 +889,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
     //   profiles.extend(p.iter().filter(|x| true).map(|x| &x.settings));
     // }
 
+    // TODO also use settings from dependencies?
     let id = random_id();
     build_cfg(&mut cfgs, &id, prof, |s| {
       s.push_str("\t\t\t\tALWAYS_SEARCH_USER_PATHS = NO;\n"); // Deprecated, must be set to NO.
@@ -1160,7 +1185,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
           s.push_str("\t\t\t\t);\n");
 
-          let incs = &*target.settings.include_dirs;
+          let incs = &*target.settings.include_dirs; // TODO extends incs
           if !incs.is_empty() {
             s.push_str("\t\t\t\tHEADER_SEARCH_PATHS = (\n");
             for inc in incs {

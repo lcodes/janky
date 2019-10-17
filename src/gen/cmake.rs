@@ -111,8 +111,8 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
                         "  message(FATAL_ERROR \"Failed to detect Emscripten: run with 'emcmake cmake .'\")\n",
                         "endif ()\n\n",
                         "set(CMAKE_EXECUTABLE_SUFFIX \".html\")\n",
-                        "set(CMAKE_RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}/dist\")\n\n"
-    ).as_bytes())?;
+                        "set(CMAKE_RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}/dist\")\n\n")
+                .as_bytes())?;
 
     // TODO hardcoded
     let flags = concat!(" -s WASM=1",
@@ -127,18 +127,14 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
 
   let rel    = ctx.input_rel.join("..");
   let prefix = rel.to_str().unwrap();
-  let files  = &ctx.sources[build.index];
+  // let files  = &ctx.sources[build.index];
 
-  let srcs = files.iter().filter(|x| {
-    x.is_source_no_objc() && build.target.match_file(&x.path, build.platform)
-  });
+  // let mut incs = files.iter().filter(|x| {
+  //   x.is_header() && build.target.match_file(&x.path, build.platform)
+  // }).map(|x| x.path.parent().unwrap().to_str().unwrap())
+  //   .collect::<Vec<&str>>();
 
-  let mut incs = files.iter().filter(|x| {
-    x.is_header() && build.target.match_file(&x.path, build.platform)
-  }).map(|x| x.path.parent().unwrap().to_str().unwrap())
-    .collect::<Vec<&str>>();
-
-  incs.dedup();
+  // incs.dedup();
 
   // TODO hardcoded flags
   let flags         = "-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti";
@@ -154,33 +150,39 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
          target_type    = target_type,
          target_subtype = target_subtype)?;
 
-  for src in srcs {
-    write!(f, "  {}/{}\n", prefix, src.to_str())?;
+  for &index in &ctx.extends[build.index] {
+    write_sources(&mut f, ctx, prefix, build.platform, index,
+                  &ctx.project.targets.values().nth(index).unwrap())?;
   }
+
+  write_sources(&mut f, ctx, prefix, build.platform, build.index, &build.target)?;
+
   f.write_all(sources.as_bytes())?;
 
   write!(f, concat!("  )\n\n",
-                    "set_target_properties({target_name} PROPERTIES\n",
-                    "  CXX_STANDARD 17\n",
-                    "  CXX_STANDARD_REQUIRED YES\n",
-                    "  CXX_EXTENSIONS NO\n",
-                    "  )\n\n",
                     "target_include_directories({target_name} PRIVATE\n"),
          target_name = build.name)?;
 
-  for inc in incs {
-    write!(f, "  {}/{}\n", prefix, inc)?;
+  // for inc in incs {
+  //   write!(f, "  {}/{}\n", prefix, inc)?;
+  // }
+
+  for &index in &ctx.extends[build.index] {
+    write_includes(&mut f, prefix, &ctx.project.targets.values().nth(index).unwrap())?;
   }
 
-  for inc in &*build.target.settings.include_dirs {
-    write!(f, "  {}/{}\n", prefix, inc)?;
-  }
+  write_includes(&mut f, prefix, &build.target)?;
 
   f.write_all(includes.as_bytes())?;
 
   write!(f, concat!("  )\n\n",
                     "target_link_libraries({target_name} PRIVATE\n",
                     "{libraries}",
+                    "  )\n\n",
+                    "set_target_properties({target_name} PROPERTIES\n",
+                    "  CXX_STANDARD 17\n",
+                    "  CXX_STANDARD_REQUIRED YES\n",
+                    "  CXX_EXTENSIONS NO\n",
                     "  )\n"),
          target_name    = build.name,
          libraries      = libraries)?;
@@ -193,6 +195,33 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
   f.flush()?;
   Ok(())
 }
+
+fn write_sources<W>(f: &mut W, ctx: &Context, prefix: &str, platform: PlatformType,
+                    index: usize, target: &Target) -> IO where
+  W: Write
+{
+  let srcs = ctx.sources[index].iter().filter(|x| {
+    x.is_source_no_objc() && target.match_file(&x.path, platform)
+  });
+
+  for src in srcs {
+    write!(f, "  {}/{}\n", prefix, src.to_str())?;
+  }
+
+  Ok(())
+}
+
+fn write_includes<W>(f: &mut W, prefix: &str, target: &Target) -> IO where W: Write {
+  for inc in &*target.settings.include_dirs {
+    write!(f, "  {}/{}\n", prefix, inc)?;
+  }
+
+  Ok(())
+}
+
+
+// HTML5 helper scripts
+// -----------------------------------------------------------------------------
 
 #[cfg(unix)]
 fn write_html5_shell_scripts(ctx: &Context, build: &Build) -> IO {

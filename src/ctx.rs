@@ -5,6 +5,10 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+
+// Lazy Error Handling
+// -----------------------------------------------------------------------------
+
 #[derive(Debug)]
 pub struct StrError(pub String);
 
@@ -19,6 +23,10 @@ impl std::error::Error for StrError {
     self.0.as_str()
   }
 }
+
+
+// Interfaces
+// -----------------------------------------------------------------------------
 
 pub trait Command : Sync {
   fn init<'a, 'b>(&self, cmd: App<'a, 'b>) -> App<'a, 'b>;
@@ -40,6 +48,10 @@ pub trait Generator : Sync {
   fn run(&self, ctx: &Context) -> RunResult;
 }
 
+
+// Execution Context
+// -----------------------------------------------------------------------------
+
 pub type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
 pub type RunResult    = DynResult<()>;
 
@@ -51,6 +63,7 @@ pub type TargetFiles  = Vec<FileInfo>;
 pub type AllFiles     = Vec<TargetFiles>;
 pub type Profiles<'a> = HashMap<&'a str, Vec<Profile<'a>>>;
 pub type Strings<'a>  = Cow<'a, [&'a str]>;
+pub type Extends      = Vec<Vec<usize>>;
 
 pub struct Context<'a> {
   pub commands:   Commands,
@@ -62,16 +75,18 @@ pub struct Context<'a> {
   pub build_rel: PathBuf,
   pub input_rel: PathBuf,
 
-  pub env:       &'a Env,
-  pub args:      &'a ArgMatches<'a>,
-  pub project:   &'a Project<'a>,
-  pub sources:   &'a AllFiles,
-  pub resources: &'a AllFiles,
-  pub assets:    &'a AllFiles,
-  pub metafiles: &'a TargetFiles,
+  pub env:       &'a Env,            // Environment variables
+  pub args:      &'a ArgMatches<'a>, // Command-line arguments
+  pub project:   &'a Project<'a>,    // Parsed project definition
+  pub extends:   &'a Extends,        // Lists of referencing target indices, by target index
+  pub extended:  &'a Extends,        // Inverse of extends
+  pub sources:   &'a AllFiles,       // Resolved source files, by target index
+  pub resources: &'a AllFiles,       // Resolved resource files, by target index
+  pub assets:    &'a AllFiles,       // Resolved asset files, by target index
+  pub metafiles: &'a TargetFiles,    // Resolved files at the project's root
 
-  pub profiles: Vec<&'a str>,
-  pub defaults: Profiles<'a>
+  pub profiles: Vec<&'a str>,        // Names for all the build profiles
+  pub defaults: Profiles<'a>         // Built-in default settings for profiles
 }
 
 #[derive(Debug)]
@@ -118,6 +133,10 @@ pub struct Env {
 
   pub jank_xcode_team: Option<String>
 }
+
+
+// Project Definitions
+// -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -232,6 +251,9 @@ pub struct Target<'a> {
   #[serde(default)]
   pub depends: Vec<&'a str>,
 
+  #[serde(default)]
+  pub extends: Vec<&'a str>,
+
   #[serde(flatten)]
   pub filter: TargetFilter,
 
@@ -283,6 +305,10 @@ impl<'a> Profile<'a> {
 
   // }
 }
+
+
+// Misc. Types
+// -----------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[repr(i8)]
@@ -379,6 +405,10 @@ pub enum CXXStandard {
   CXX14 = 14,
   CXX17 = 17
 }
+
+
+// Build Settings
+// -----------------------------------------------------------------------------
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]

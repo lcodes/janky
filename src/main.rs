@@ -114,7 +114,25 @@ fn main() {
       files
     });
 
-  // #[cfg(debug_assertions)]
+  // Resolve target references (TODO: should probably check if arch/platform matches)
+  let extends = project.targets.values().map(|target| {
+    target.extends.iter().map(|target_name| {
+      project.targets.keys()
+        .position(|name| name == target_name)
+        .check(|| format!("No such target to extend: {}", target_name))
+    }).collect::<Vec<usize>>()
+  }).collect::<ctx::Extends>();
+
+  let extended = project.targets.keys().map(|target_name| {
+    project.targets.values().enumerate().map(|(index, target)| {
+      match target.extends.contains(target_name) {
+        true  => Some(index),
+        false => None
+      }
+    }).flatten()
+      .collect::<Vec<usize>>()
+  }).collect::<ctx::Extends>();
+
   // println!("{:#?}", project);
 
   // Execute the requested command.
@@ -123,6 +141,8 @@ fn main() {
     env:       &env,
     args:      &args,
     project:   &project,
+    extends:   &extends,
+    extended:  &extended,
     sources:   &sources,
     resources: &resources,
     assets:    &assets,
@@ -142,6 +162,10 @@ fn main() {
   ctx.commands[cmd_name].run(&ctx)
     .check(|| format!("Failed to run command ({})", cmd_name));
 }
+
+
+// Utilities
+// -----------------------------------------------------------------------------------
 
 #[derive(Debug)]
 struct MinVerError {
@@ -225,6 +249,10 @@ fn find_files(dir: &PathBuf, patterns: &[&str]) -> ctx::DynResult<ctx::TargetFil
   Ok(files)
 }
 
+
+// Dumb error handling
+// -----------------------------------------------------------------------------
+
 trait Check {
   type R;
   fn check<F, S>(self, msg: F) -> Self::R where F: FnOnce() -> S, S: Display;
@@ -235,6 +263,16 @@ impl Check for bool {
   fn check<F, S>(self, msg: F) where F: FnOnce() -> S, S: Display {
     if !self {
       fatal(msg());
+    }
+  }
+}
+
+impl<T> Check for Option<T> {
+  type R = T;
+  fn check<F, S>(self, msg: F) -> Self::R where F: FnOnce() -> S, S: Display {
+    match self {
+      None    => fatal(msg()),
+      Some(v) => v
     }
   }
 }
