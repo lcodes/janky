@@ -81,7 +81,7 @@ use std::path::{Path, PathBuf};
 use std::str::from_utf8;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::ctx::{Context, Generator, PlatformType, RunResult, StrError, Target, TargetType};
+use crate::ctx::{Context, Generator, PlatformType, RunResult, StrError, Target, TargetFiles, TargetType};
 
 const PLATFORMS: &[PlatformType] = &[
   PlatformType::MacOS,
@@ -172,7 +172,7 @@ fn hex_char(b: u8) -> char {
 }
 
 fn quote(s: &str) -> Cow<'_, str> {
-  match s.is_empty() || s.contains(' ') || s.contains('-') {
+  match s.is_empty() || s.contains(' ') || s.contains('-') || s.contains('=') {
     true  => Cow::Owned(["\"", s, "\""].join("")),
     false => Cow::Borrowed(s)
   }
@@ -386,6 +386,56 @@ fn build_file(phase: &mut String, files: &mut String, file_name: &str,
          name  = file_name,
          refid = ref_id,
          phase = phase_name).unwrap();
+}
+
+fn build_files(sources: &mut String, resources: &mut String, files: &mut String,
+               platform: PlatformType, stats: &FileStatsMap,
+               target_files: &TargetFiles, target: &Target)
+{
+  for file_info in target_files {
+    if file_info.meta.is_dir() || !target.match_file(&file_info.path, platform) {
+      continue;
+    }
+    let name = file_info.name();
+    let file = &stats[&file_info.path];
+
+    match file.phase {
+      Phase::None     => {},
+      Phase::Source   => build_file(sources,   files, name, &file.id, "Sources"),
+      Phase::Resource => build_file(resources, files, name, &file.id, "Resources")
+    }
+  }
+}
+
+fn header_paths(has_includes: &mut bool, s: &mut String, target: &Target) {
+  let incs = &*target.settings.include_dirs;
+  if !incs.is_empty() {
+    if !*has_includes {
+      *has_includes = true;
+      s.push_str("\t\t\t\tHEADER_SEARCH_PATHS = (\n");
+    }
+    for inc in incs {
+      write!(s, "\t\t\t\t\t{},\n", quote(inc)).unwrap();
+    }
+  }
+}
+
+fn define_macros(has_defines: &mut bool, s: &mut String, target: &Target) {
+  let defs = &*target.settings.defines;
+  if !defs.is_empty() {
+    if !*has_defines {
+      *has_defines = true;
+      s.push_str("\t\t\t\tGCC_PREPROCESSOR_DEFINITIONS = (\n");
+    }
+    for def in defs {
+      write!(s, "\t\t\t\t\t{},\n", quote(def)).unwrap();
+    }
+  }
+}
+
+fn end_settings_list(s: &mut String) {
+  s.push_str(concat!("\t\t\t\t\t\"$(inherited)\",\n",
+                     "\t\t\t\t);\n"));
 }
 
 fn build_cfg<F>(cfg: &mut String, id: &str, name: &str, f: F) where F: FnOnce(&mut String) {
@@ -821,6 +871,8 @@ fn build_project_group<'a>(ctx: &Context, refs: &mut String) -> Group<'a> {
 // PBXProj
 // -----------------------------------------------------------------------------
 
+type FileStatsMap<'a> = HashMap<&'a PathBuf, FileStats>;
+
 fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
   // Open the file for writing right away to bail out early on failure.
   let mut f = BufWriter::new(File::create(path)?);
@@ -856,7 +908,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
     ctx.sources.iter().flatten()
       .filter(|info| info.meta.is_file())
-      .fold(HashMap::<&PathBuf, FileStats>::new(), |mut m, info| {
+      .fold(FileStatsMap::new(), |mut m, info| {
         m.entry(&info.path)
           .and_modify(|e| {
             if e.num_targets == 1 {
@@ -891,7 +943,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
     // TODO also use settings from dependencies?
     let id = random_id();
-    build_cfg(&mut cfgs, &id, prof, |s| {
+    build_cfg(&mut cfgs, &id, prof, |mut s| {
       s.push_str("\t\t\t\tALWAYS_SEARCH_USER_PATHS = NO;\n"); // Deprecated, must be set to NO.
 
       // TODO dont hardcode
@@ -946,8 +998,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
           write!(s, "\t\t\t\t\t\"{}\",\n", d).unwrap();
         }
 
-        s.push_str(concat!("\t\t\t\t\t\"$(inherited)\",\n",
-                           "\t\t\t\t);\n"));
+        end_settings_list(&mut s);
       }
 
       if !release {
@@ -1116,6 +1167,24 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
             write!(s, "\t\t\t\tDEVELOPMENT_TEAM = {};\n", id).unwrap();
           }
 
+          let mut has_defines = false;
+          for &index in &ctx.extends[target_index] {
+            define_macros(&mut has_defines, &mut s, ctx.get_target(index));
+          }
+          define_macros(&mut has_defines, &mut s, target);
+          if has_defines {
+            end_settings_list(&mut s);
+          }
+
+          let mut has_includes = false;
+          for &index in &ctx.extends[target_index] {
+            header_paths(&mut has_includes, &mut s, ctx.get_target(index));
+          }
+          header_paths(&mut has_includes, &mut s, target);
+          if has_includes {
+            end_settings_list(&mut s);
+          }
+
           s.push_str(&settings_info_plist);
 
           // TODO libraries
@@ -1185,15 +1254,6 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
           s.push_str("\t\t\t\t);\n");
 
-          let incs = &*target.settings.include_dirs; // TODO extends incs
-          if !incs.is_empty() {
-            s.push_str("\t\t\t\tHEADER_SEARCH_PATHS = (\n");
-            for inc in incs {
-              write!(&mut s, "\t\t\t\t\t{},\n", inc).unwrap();
-            }
-            s.push_str("\t\t\t\t);\n");
-          }
-
           if platform == PlatformType::MacOS {
             s.push_str(sdk_version);
           }
@@ -1251,19 +1311,12 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
       }
 
       // Generate the build files for this target.
-      for file_info in target_files {
-        if file_info.meta.is_dir() || !target.match_file(&file_info.path, platform) {
-          continue;
-        }
-        let name = file_info.name();
-        let file = &file_stats[&file_info.path];
-
-        match file.phase {
-          Phase::None     => {},
-          Phase::Source   => build_file(&mut sources,   &mut files, name, &file.id, "Sources"),
-          Phase::Resource => build_file(&mut resources, &mut files, name, &file.id, "Resources")
-        }
+      for &index in &ctx.extends[target_index] {
+        build_files(&mut sources, &mut resources, &mut files, platform, &file_stats,
+                    &ctx.sources[index], ctx.get_target(index));
       }
+
+      build_files(&mut sources, &mut resources, &mut files, platform, &file_stats, target_files, &target);
 
       // Finalize the target's build phase objects.
       const BUILD_PHASE_END: &str = concat!("\t\t\t);\n",

@@ -89,6 +89,12 @@ pub struct Context<'a> {
   pub defaults: Profiles<'a>         // Built-in default settings for profiles
 }
 
+impl<'a> Context<'a> {
+  pub fn get_target(&self, index: usize) -> &Target<'a> {
+    self.project.targets.values().nth(index).unwrap()
+  }
+}
+
 #[derive(Debug)]
 pub struct FileInfo {
   pub path: PathBuf,

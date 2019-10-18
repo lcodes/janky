@@ -140,6 +140,7 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
   let flags         = "-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti";
   let release_flags = "-Werror";
   write!(f, concat!("set(CMAKE_CXX_FLAGS \"{flags}\")\n",
+                    "set(CMAKE_CXX_FLAGS_DEBUG \"-D_DEBUG=1\")\n",
                     "set(CMAKE_CXX_FLAGS_MINSIZEREL \"{release_flags}\")\n",
                     "set(CMAKE_CXX_FLAGS_RELWITHDEBINFO \"{release_flags}\")\n",
                     "set(CMAKE_CXX_FLAGS_RELEASE \"{release_flags}\")\n\n",
@@ -151,8 +152,7 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
          target_subtype = target_subtype)?;
 
   for &index in &ctx.extends[build.index] {
-    write_sources(&mut f, ctx, prefix, build.platform, index,
-                  &ctx.project.targets.values().nth(index).unwrap())?;
+    write_sources(&mut f, ctx, prefix, build.platform, index, ctx.get_target(index))?;
   }
 
   write_sources(&mut f, ctx, prefix, build.platform, build.index, &build.target)?;
@@ -168,7 +168,7 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
   // }
 
   for &index in &ctx.extends[build.index] {
-    write_includes(&mut f, prefix, &ctx.project.targets.values().nth(index).unwrap())?;
+    write_includes(&mut f, prefix, ctx.get_target(index))?;
   }
 
   write_includes(&mut f, prefix, &build.target)?;
@@ -179,13 +179,23 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
                     "target_link_libraries({target_name} PRIVATE\n",
                     "{libraries}",
                     "  )\n\n",
+                    "target_compile_definitions({target_name} PRIVATE\n"),
+         target_name = build.name,
+         libraries   = libraries)?;
+
+  for &index in &ctx.extends[build.index] {
+    write_defines(&mut f, ctx.get_target(index))?;
+  }
+
+  write_defines(&mut f, &build.target)?;
+
+  write!(f, concat!("  )\n\n",
                     "set_target_properties({target_name} PROPERTIES\n",
                     "  CXX_STANDARD 17\n",
                     "  CXX_STANDARD_REQUIRED YES\n",
                     "  CXX_EXTENSIONS NO\n",
                     "  )\n"),
-         target_name    = build.name,
-         libraries      = libraries)?;
+         target_name = build.name)?;
 
   if build.platform == PlatformType::HTML5 {
     #[cfg(unix)]
@@ -214,6 +224,14 @@ fn write_sources<W>(f: &mut W, ctx: &Context, prefix: &str, platform: PlatformTy
 fn write_includes<W>(f: &mut W, prefix: &str, target: &Target) -> IO where W: Write {
   for inc in &*target.settings.include_dirs {
     write!(f, "  {}/{}\n", prefix, inc)?;
+  }
+
+  Ok(())
+}
+
+fn write_defines<W>(f: &mut W, target: &Target) -> IO where W: Write {
+  for def in &*target.settings.defines {
+    write!(f, "  {}\n", def)?;
   }
 
   Ok(())
