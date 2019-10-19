@@ -5,7 +5,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::ctx::{Architecture, Context, Generator, FileInfo,
-                 PlatformType, RunResult, Target};
+                 PlatformType, RunResult, Target, TargetFiles};
 
 pub struct VisualStudio;
 
@@ -198,27 +198,21 @@ fn write_filters(ctx: &Context, index: usize, proj: &Proj) -> IO {
   let files = &ctx.sources[index];
   {
     let mut dir_set = HashSet::new();
-    for dir in files.iter().filter(|x| x.meta.is_dir()) {
-      write_filter_dir(&mut f, &mut dir_set, &dir.path)?;
+    for &extend_index in &ctx.extends[index] {
+      write_filter_dirs(&mut f, &mut dir_set, &ctx.sources[extend_index])?;
     }
+    write_filter_dirs(&mut f, &mut dir_set, files)?;
   }
 
   f.write_all(concat!("  </ItemGroup>\r\n",
                       "  <ItemGroup>\r\n").as_bytes())?;
 
-  let target = proj.target.unwrap();
   let prefix = ctx.input_rel.to_str().unwrap();
-  for file in files.iter().filter(|x| x.meta.is_file()) {
-    if let Some(filter) = file.path.parent() {
-      write!(f, concat!("    <{element} Include=\"{prefix}\\{include}\">\r\n",
-                        "      <Filter>{filter}</Filter>\r\n",
-                        "    </{element}>\r\n"),
-             element = get_item_group_element(target, file),
-             prefix  = prefix,
-             include = file.to_str(),
-             filter  = filter.to_str().unwrap())?;
-    }
+  for &extend_index in &ctx.extends[index] {
+    write_filter_files(&mut f, prefix, &ctx.sources[extend_index],
+                       ctx.get_target(extend_index))?;
   }
+  write_filter_files(&mut f, prefix, files, proj.target.unwrap())?;
 
   f.write_all(concat!("  </ItemGroup>\r\n",
                       "</Project>\r\n").as_bytes())?;
@@ -227,10 +221,19 @@ fn write_filters(ctx: &Context, index: usize, proj: &Proj) -> IO {
   Ok(())
 }
 
+fn write_filter_dirs<'a, W>(f:     &mut W,
+                            set:   &mut HashSet<&'a Path>,
+                            files: &'a TargetFiles) -> IO where W: Write
+{
+  for dir in files.iter().filter(|x| x.meta.is_dir()) {
+    write_filter_dir(f, set, &dir.path)?;
+  }
+  Ok(())
+}
+
 fn write_filter_dir<'a, W>(f:    &mut W,
                            set:  &mut HashSet<&'a Path>,
-                           path: &'a Path) -> IO where
-  W: Write
+                           path: &'a Path) -> IO where W: Write
 {
   if let Some(p) = path.parent() {
     // FIXME: better way to test empty path than getting a string slice?
@@ -246,6 +249,23 @@ fn write_filter_dir<'a, W>(f:    &mut W,
          dir  = path.to_str().unwrap(),
          uuid = random_uuid())?;
 
+  Ok(())
+}
+
+fn write_filter_files<W>(f: &mut W, prefix: &str, files: &TargetFiles,
+                         target: &Target) -> IO where W: Write
+{
+  for file in files.iter().filter(|x| x.meta.is_file()) {
+    if let Some(filter) = file.path.parent() {
+      write!(f, concat!("    <{element} Include=\"{prefix}\\{include}\">\r\n",
+                        "      <Filter>{filter}</Filter>\r\n",
+                        "    </{element}>\r\n"),
+             element = get_item_group_element(target, file),
+             prefix  = prefix,
+             include = file.to_str(),
+             filter  = filter.to_str().unwrap())?;
+    }
+  }
   Ok(())
 }
 
@@ -272,9 +292,10 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
   f.write_all(b"  <PropertyGroup Label=\"Globals\">\r\n")?;
   write!(f, "    <ProjectGuid>{{{}}}</ProjectGuid>\r\n", proj.uuid)?;
   //f.write_fmt(format_args!("    <Keyword>{}</Keyword>\r\n", "Android"))?;
-  write!(f, concat!("    <RootNamespace>{}</RootNamespace>\r\n",
-                    "    <IntDir>$(Platform)\\$(Configuration)\\$(ProjectName)</IntDir>\r\n"),
-         proj.name)?;
+  write!(f, concat!("    <RootNamespace>{project_name}</RootNamespace>\r\n",
+                    "    <OutDir>$(Platform)\\$(Configuration)\\{project_name}\\</OutDir>\r\n",
+                    "    <IntDir>$(Platform)\\$(Configuration)\\{project_name}\\</IntDir>\r\n"),
+         project_name = proj.name)?;
   f.write_all(b"  </PropertyGroup>\r\n")?;
 
   write_proj_import(&mut f, match proj.kind {
@@ -343,20 +364,13 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
                     "      <AdditionalIncludeDirectories>"),
          warnings = disable_warnings)?;
 
-  let files = &ctx.sources[index];
   let prefix = ctx.input_rel.to_str().unwrap();
-  let mut include_paths = HashSet::new();
-
-  for header in files.iter().filter(|x| x.is_header()) {
-    if let Some(p) = header.path.parent() {
-      if !include_paths.contains(p) {
-        include_paths.insert(p);
-        write!(f, "{}\\{};", prefix, p.to_str().unwrap())?;
-      }
-    }
-  }
-
   let target = proj.target.unwrap();
+  for &extend_index in &ctx.extends[index] {
+    write_includes(&mut f, prefix, ctx.get_target(extend_index))?;
+  }
+  write_includes(&mut f, prefix, target)?;
+
   for inc in &*target.settings.include_dirs {
     write!(f, "{}\\{};", prefix, inc)?;
   }
@@ -367,15 +381,9 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
                     "    </ClCompile>\r\n",
                     "    <Link>\r\n",
                     "      <SubSystem>{subsystem}</SubSystem>\r\n",
-                    "      <AdditionalDependencies>"),
+                    "    </Link>\r\n",
+                    "  </ItemDefinitionGroup>\r\n"),
          subsystem = "Windows")?;
-
-  // TODO hardcoded
-  f.write_all(b"OpenGL32.lib;")?;
-
-  f.write_all(concat!("%(AdditionalDependencies)</AdditionalDependencies>\r\n",
-                      "    </Link>\r\n",
-                      "  </ItemDefinitionGroup>\r\n").as_bytes())?;
 
   // TODO hardcoded
   for prof in &ctx.profiles {
@@ -393,10 +401,27 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
                           "      <IntrinsicFunctions>true</IntrinsicFunctions>\r\n").as_bytes())?;
     }
 
-    f.write_all(b"    </ClCompile>\r\n")?;
-    // TODO link dependencies
+    f.write_all(b"      <PreprocessorDefinitions>")?;
 
-    f.write_all(b"  </ItemDefinitionGroup>\r\n")?;
+    if *prof == "Debug" {
+      f.write_all(b"_ITERATOR_DEBUG_LEVEL=1;")?;
+    }
+    for &extend_index in &ctx.extends[index] {
+      write_defines(&mut f, ctx.get_target(extend_index))?;
+    }
+    write_defines(&mut f, target)?;
+
+    f.write_all(concat!("%(PreprocessorDefinitions)</PreprocessorDefinitions>\r\n",
+                        "    </ClCompile>\r\n",
+                        "    <Link>\r\n",
+                        "      <AdditionalDependencies>").as_bytes())?;
+
+    // TODO hardcoded
+    f.write_all(b"OpenGL32.lib;")?;
+
+    f.write_all(concat!("%(AdditionalDependencies)</AdditionalDependencies>\r\n",
+                        "    </Link>\r\n",
+                        "  </ItemDefinitionGroup>\r\n").as_bytes())?;
   }
 
   // TODO project references
@@ -408,10 +433,10 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
 
     },
     ProjKind::CXX => {
-      for file in files.iter().filter(|x| x.meta.is_file()) {
-        write!(f, "    <{} Include=\"{}\\{}\" />\r\n",
-               get_item_group_element(target, file), prefix, file.to_str())?;
+      for &extend_index in &ctx.extends[index] {
+        write_files(&mut f, ctx, extend_index, prefix, ctx.get_target(extend_index))?;
       }
+      write_files(&mut f, ctx, index, prefix, target)?;
     },
     ProjKind::Items => unreachable!()
   }
@@ -434,6 +459,31 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
 
   f.write_all(b"</Project>\r\n")?;
   f.flush()?;
+  Ok(())
+}
+
+fn write_includes<W>(f: &mut W, prefix: &str, target: &Target) -> IO where W: Write {
+  for inc in &*target.settings.include_dirs {
+    write!(f, "{}\\{};", prefix, inc.replace("/", "\\"))?;
+  }
+  Ok(())
+}
+
+fn write_defines<W>(f: &mut W, target: &Target) -> IO where W: Write {
+  for def in &*target.settings.defines {
+    write!(f, "{};", def)?;
+  }
+  Ok(())
+}
+
+fn write_files<W>(f: &mut W, ctx: &Context, index: usize,
+                  prefix: &str, target: &Target) -> IO where W: Write
+{
+  for file in ctx.sources[index].iter().filter(|x| x.meta.is_file()) {
+    write!(f, "    <{} Include=\"{}\\{}\" />\r\n",
+           get_item_group_element(target, file), prefix, file.to_str())?;
+  }
+
   Ok(())
 }
 
