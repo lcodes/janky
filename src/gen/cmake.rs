@@ -97,7 +97,12 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
     PlatformType::HTML5 =>
       concat!("  openal\n",
               "  websocket.js\n"),
-    PlatformType::Linux => "",
+    PlatformType::Linux =>
+      concat!("  pthread\n",
+              "  GL\n",
+              "  X11\n",
+              "  X11-xcb\n",
+              "  xcb\n"),
     _ => unreachable!()
   };
 
@@ -146,9 +151,15 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
     _                     => unreachable!()
   };
 
+  let g = match build.platform {
+    PlatformType::HTML5 => "-g4",
+    _                   => "-g"
+  };
+
   // TODO hardcoded flags
-  let cflags          = "-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti";
-  let debug_cflags    = format!("-I{}/3rdparty/include/debug -D_DEBUG=1 -g4", prefix);
+  // TODO -Wpedantic is annoying with GCC
+  let cflags          = "-Wall -Wextra -fno-exceptions -fno-rtti";
+  let debug_cflags    = format!("-I{}/3rdparty/include/debug -D_DEBUG=1 {}", prefix, g);
   let release_cflags  = format!("-I{}/3rdparty/include/release -Werror", prefix);
   let debug_ldflags   = format!("-L{}/3rdparty/lib/{}/{}/debug", prefix, platform_lc, arch_lc);
   let release_ldflags = format!("-L{}/3rdparty/lib/{}/{}/release", prefix, platform_lc, arch_lc);
