@@ -407,35 +407,35 @@ fn build_files(sources: &mut String, resources: &mut String, files: &mut String,
   }
 }
 
-fn header_paths(has_includes: &mut bool, s: &mut String, target: &Target) {
-  let incs = &*target.settings.include_dirs;
-  if !incs.is_empty() {
-    if !*has_includes {
-      *has_includes = true;
-      s.push_str("\t\t\t\tHEADER_SEARCH_PATHS = (\n");
+fn end_settings_list(is_open: bool, s: &mut String) {
+  if is_open {
+    s.push_str(concat!("\t\t\t\t\t\"$(inherited)\",\n",
+                       "\t\t\t\t);\n"));
+  }
+}
+
+fn settings_list(prop: &str, is_open: &mut bool, s: &mut String, list: &[&str]) {
+  if !list.is_empty() {
+    if !*is_open {
+      *is_open = true;
+      write!(s, "\t\t\t\t{} = (\n", prop).unwrap();
     }
-    for inc in incs {
-      write!(s, "\t\t\t\t\t{},\n", quote(inc)).unwrap();
+    for item in list {
+      write!(s, "\t\t\t\t\t{},\n", quote(item)).unwrap();
     }
   }
 }
 
-fn define_macros(has_defines: &mut bool, s: &mut String, target: &Target) {
-  let defs = &*target.settings.defines;
-  if !defs.is_empty() {
-    if !*has_defines {
-      *has_defines = true;
-      s.push_str("\t\t\t\tGCC_PREPROCESSOR_DEFINITIONS = (\n");
-    }
-    for def in defs {
-      write!(s, "\t\t\t\t\t{},\n", quote(def)).unwrap();
-    }
-  }
+fn library_paths(has_libraries: &mut bool, s: &mut String, libs: &[&str]) {
+  settings_list("LIBRARY_SEARCH_PATHS", has_libraries, s, libs);
 }
 
-fn end_settings_list(s: &mut String) {
-  s.push_str(concat!("\t\t\t\t\t\"$(inherited)\",\n",
-                     "\t\t\t\t);\n"));
+fn header_paths(has_includes: &mut bool, s: &mut String, incs: &[&str]) {
+  settings_list("HEADER_SEARCH_PATHS", has_includes, s, incs);
+}
+
+fn define_macros(has_defines: &mut bool, s: &mut String, defs: &[&str]) {
+  settings_list("GCC_PREPROCESSOR_DEFINITIONS", has_defines, s, defs);
 }
 
 fn build_cfg<F>(cfg: &mut String, id: &str, name: &str, f: F) where F: FnOnce(&mut String) {
@@ -998,7 +998,7 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
           write!(s, "\t\t\t\t\t\"{}\",\n", d).unwrap();
         }
 
-        end_settings_list(&mut s);
+        end_settings_list(true, &mut s);
       }
 
       if !release {
@@ -1153,8 +1153,17 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
         settings_app_icon   = String::new();
       }
 
+      let platform_dir = match platform {
+        PlatformType::MacOS   => "macos",
+        PlatformType::IOS     |
+        PlatformType::WatchOS |
+        PlatformType::TVOS    => "ios",
+        _ => unreachable!()
+      };
+
       // Generate the build configurations for this target.
       for prof in &ctx.profiles {
+        let prof_lc = prof.to_lowercase();
         let id = random_id();
         build_cfg(&mut cfgs, &id, prof, |mut s| {
           s.push_str(&settings_app_icon);
@@ -1167,23 +1176,27 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
             write!(s, "\t\t\t\tDEVELOPMENT_TEAM = {};\n", id).unwrap();
           }
 
+          let extra_inc = ["3rdparty/include/", &prof_lc].join("");
+          let extra_lib = ["3rdparty/lib/", platform_dir, "/x64/", &prof_lc].join("");
+
           let mut has_defines = false;
           for &index in &ctx.extends[target_index] {
-            define_macros(&mut has_defines, &mut s, ctx.get_target(index));
+            define_macros(&mut has_defines, &mut s, &*ctx.get_target(index).settings.defines);
           }
-          define_macros(&mut has_defines, &mut s, target);
-          if has_defines {
-            end_settings_list(&mut s);
-          }
+          define_macros(&mut has_defines, &mut s, &*target.settings.defines);
+          end_settings_list(has_defines, &mut s);
 
           let mut has_includes = false;
+          header_paths(&mut has_includes, &mut s, &[extra_inc.as_str()]);
           for &index in &ctx.extends[target_index] {
-            header_paths(&mut has_includes, &mut s, ctx.get_target(index));
+            header_paths(&mut has_includes, &mut s, &*ctx.get_target(index).settings.include_dirs);
           }
-          header_paths(&mut has_includes, &mut s, target);
-          if has_includes {
-            end_settings_list(&mut s);
-          }
+          header_paths(&mut has_includes, &mut s, &*target.settings.include_dirs);
+          end_settings_list(has_includes, &mut s);
+
+          let mut has_libraries = false;
+          library_paths(&mut has_libraries, &mut s, &[extra_lib.as_str()]);
+          end_settings_list(has_libraries, &mut s);
 
           s.push_str(&settings_info_plist);
 
@@ -1270,6 +1283,14 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
 
           if platform == PlatformType::TVOS || platform == PlatformType::WatchOS {
             s.push_str(sdk_version);
+          }
+
+          if !target.settings.libs.is_empty() {
+            s.push_str("\t\t\t\tOTHER_LDFLAGS = (\n");
+            for lib in &*target.settings.libs {
+              write!(s, "\t\t\t\t\t\"-l{}\",\n", lib).unwrap();
+            }
+            s.push_str("\t\t\t\t);\n");
           }
 
           // TODO compiler

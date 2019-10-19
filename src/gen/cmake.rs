@@ -103,19 +103,24 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
 
   let cmake_version = "3.10.2"; // TODO dont hardcode
   write!(f, concat!("cmake_minimum_required(VERSION {})\n",
-                    "project({})\n\n"),
+                    "project({})\n\n",
+                    "if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)\n",
+                    "  set(CMAKE_BUILD_TYPE Debug)\n",
+                    "endif()\n\n"),
          cmake_version, build.name)?;
 
   if build.platform == PlatformType::HTML5 {
-    f.write_all(concat!("if (NOT ${CMAKE_SYSTEM_NAME} MATCHES \"Emscripten\")\n",
+    f.write_all(concat!("if(NOT ${CMAKE_SYSTEM_NAME} MATCHES \"Emscripten\")\n",
                         "  message(FATAL_ERROR \"Failed to detect Emscripten: run with 'emcmake cmake .'\")\n",
-                        "endif ()\n\n",
+                        "endif()\n\n",
                         "set(CMAKE_EXECUTABLE_SUFFIX \".html\")\n",
                         "set(CMAKE_RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}/dist\")\n\n")
                 .as_bytes())?;
 
     // TODO hardcoded
     let flags = concat!(" -s WASM=1",
+                        // " -s USE_PTHREADS=1",
+                        // " -s PTHREAD_POOL_SIZE=4",
                         " -s USE_WEBGL2=1",
                         " -s EXIT_RUNTIME=1",
                         " -s ASSERTIONS=2",
@@ -140,7 +145,7 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
   let flags         = "-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti";
   let release_flags = "-Werror";
   write!(f, concat!("set(CMAKE_CXX_FLAGS \"{flags}\")\n",
-                    "set(CMAKE_CXX_FLAGS_DEBUG \"-D_DEBUG=1\")\n",
+                    "set(CMAKE_CXX_FLAGS_DEBUG \"-D_DEBUG=1 -g4\")\n",
                     "set(CMAKE_CXX_FLAGS_MINSIZEREL \"{release_flags}\")\n",
                     "set(CMAKE_CXX_FLAGS_RELWITHDEBINFO \"{release_flags}\")\n",
                     "set(CMAKE_CXX_FLAGS_RELEASE \"{release_flags}\")\n\n",
@@ -260,7 +265,7 @@ fn write_html5_shell_scripts(ctx: &Context, build: &Build) -> IO {
                       "  *)      jobs=4;;\n",
                       "esac\n",
                       "emcmake cmake .\n",
-                      "emmake make -j $jobs\n"),
+                      "emmake make -j $jobs $*\n"),
            build.name)?;
     Ok(())
   })?;
