@@ -62,15 +62,15 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
     path
   })?);
 
-  let (target_type, target_subtype) = match build.target.target_type {
+  let (target_type, ld_type, target_subtype) = match build.target.target_type {
     TargetType::Application => {
       match build.platform {
-        PlatformType::Android => ("library",    " SHARED"),
-        _                     => ("executable", "")
+        PlatformType::Android => ("library",   "SHARED", " SHARED"),
+        _                     => ("executable", "EXE",   "")
       }
     },
-    TargetType::StaticLibrary => ("library", " STATIC"),
-    TargetType::SharedLibrary => ("library", " SHARED"),
+    TargetType::StaticLibrary => ("library", "STATIC", " STATIC"),
+    TargetType::SharedLibrary => ("library", "SHARED", " SHARED"),
     _ => unreachable!()
   };
 
@@ -132,29 +132,45 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
 
   let rel    = ctx.input_rel.join("..");
   let prefix = rel.to_str().unwrap();
-  // let files  = &ctx.sources[build.index];
+  let platform_lc = match build.platform {
+    PlatformType::Android => "android",
+    PlatformType::Linux   => "linux",
+    PlatformType::HTML5   => "html5",
+    _                     => unreachable!()
+  };
 
-  // let mut incs = files.iter().filter(|x| {
-  //   x.is_header() && build.target.match_file(&x.path, build.platform)
-  // }).map(|x| x.path.parent().unwrap().to_str().unwrap())
-  //   .collect::<Vec<&str>>();
-
-  // incs.dedup();
+  let arch_lc = match build.platform { // TODO
+    PlatformType::Android => "arm64",
+    PlatformType::Linux   => "x64",
+    PlatformType::HTML5   => "wasm32",
+    _                     => unreachable!()
+  };
 
   // TODO hardcoded flags
-  let flags         = "-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti";
-  let release_flags = "-Werror";
-  write!(f, concat!("set(CMAKE_CXX_FLAGS \"{flags}\")\n",
-                    "set(CMAKE_CXX_FLAGS_DEBUG \"-D_DEBUG=1 -g4\")\n",
-                    "set(CMAKE_CXX_FLAGS_MINSIZEREL \"{release_flags}\")\n",
-                    "set(CMAKE_CXX_FLAGS_RELWITHDEBINFO \"{release_flags}\")\n",
-                    "set(CMAKE_CXX_FLAGS_RELEASE \"{release_flags}\")\n\n",
+  let cflags          = "-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti";
+  let debug_cflags    = format!("-I{}/3rdparty/include/debug -D_DEBUG=1 -g4", prefix);
+  let release_cflags  = format!("-I{}/3rdparty/include/release -Werror", prefix);
+  let debug_ldflags   = format!("-L{}/3rdparty/lib/{}/{}/debug", prefix, platform_lc, arch_lc);
+  let release_ldflags = format!("-L{}/3rdparty/lib/{}/{}/release", prefix, platform_lc, arch_lc);
+  write!(f, concat!("set(CMAKE_CXX_FLAGS \"{cflags}\")\n",
+                    "set(CMAKE_CXX_FLAGS_DEBUG \"{debug_cflags}\")\n",
+                    "set(CMAKE_CXX_FLAGS_MINSIZEREL \"{release_cflags}\")\n",
+                    "set(CMAKE_CXX_FLAGS_RELWITHDEBINFO \"{release_cflags}\")\n",
+                    "set(CMAKE_CXX_FLAGS_RELEASE \"{release_cflags}\")\n",
+                    "set(CMAKE_{ld_type}_LINKER_FLAGS_DEBUG \"{debug_ldflags}\")\n",
+                    "set(CMAKE_{ld_type}_LINKER_FLAGS_MINSIZEREL \"{release_ldflags}\")\n",
+                    "set(CMAKE_{ld_type}_LINKER_FLAGS_RELWITHDEBINFO \"{release_ldflags}\")\n",
+                    "set(CMAKE_{ld_type}_LINKER_FLAGS_RELEASE \"{release_ldflags}\")\n\n",
                     "add_{target_type}({target_name}{target_subtype}\n"),
-         flags          = flags,
-         release_flags  = release_flags,
-         target_name    = build.name,
-         target_type    = target_type,
-         target_subtype = target_subtype)?;
+         cflags          = cflags,
+         debug_cflags    = debug_cflags,
+         release_cflags  = release_cflags,
+         ld_type         = ld_type,
+         debug_ldflags   = debug_ldflags,
+         release_ldflags = release_ldflags,
+         target_name     = build.name,
+         target_type     = target_type,
+         target_subtype  = target_subtype)?;
 
   for &index in &ctx.extends[build.index] {
     write_sources(&mut f, ctx, prefix, build.platform, index, ctx.get_target(index))?;
@@ -168,10 +184,6 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
                     "target_include_directories({target_name} PRIVATE\n"),
          target_name = build.name)?;
 
-  // for inc in incs {
-  //   write!(f, "  {}/{}\n", prefix, inc)?;
-  // }
-
   for &index in &ctx.extends[build.index] {
     write_includes(&mut f, prefix, ctx.get_target(index))?;
   }
@@ -181,9 +193,16 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
   f.write_all(includes.as_bytes())?;
 
   write!(f, concat!("  )\n\n",
-                    "target_link_libraries({target_name} PRIVATE\n",
-                    "{libraries}",
-                    "  )\n\n",
+                    "target_link_libraries({target_name} PRIVATE\n"),
+         target_name = build.name)?;
+
+  for &index in &ctx.extends[build.index] {
+    write_libraries(&mut f, ctx.get_target(index))?;
+  }
+
+  write_libraries(&mut f, &build.target)?;
+
+  write!(f, concat!("{libraries}  )\n\n",
                     "target_compile_definitions({target_name} PRIVATE\n"),
          target_name = build.name,
          libraries   = libraries)?;
@@ -237,6 +256,14 @@ fn write_includes<W>(f: &mut W, prefix: &str, target: &Target) -> IO where W: Wr
 fn write_defines<W>(f: &mut W, target: &Target) -> IO where W: Write {
   for def in &*target.settings.defines {
     write!(f, "  {}\n", def)?;
+  }
+
+  Ok(())
+}
+
+fn write_libraries<W>(f: &mut W, target: &Target) -> IO where W: Write {
+  for lib in &*target.settings.libs {
+    write!(f, "  {}\n", lib)?;
   }
 
   Ok(())

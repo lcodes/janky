@@ -1285,13 +1285,18 @@ fn write_pbx(ctx: &Context, path: &Path, team: Option<&str>) -> IO {
             s.push_str(sdk_version);
           }
 
-          if !target.settings.libs.is_empty() {
-            s.push_str("\t\t\t\tOTHER_LDFLAGS = (\n");
-            for lib in &*target.settings.libs {
+          // if !target.settings.libs.is_empty() {
+          s.push_str("\t\t\t\tOTHER_LDFLAGS = (\n");
+          for &index in &ctx.extends[target_index] {
+            for lib in &*ctx.get_target(index).settings.libs {
               write!(s, "\t\t\t\t\t\"-l{}\",\n", lib).unwrap();
             }
-            s.push_str("\t\t\t\t);\n");
           }
+          for lib in &*target.settings.libs {
+            write!(s, "\t\t\t\t\t\"-l{}\",\n", lib).unwrap();
+          }
+          s.push_str("\t\t\t\t);\n");
+          // }
 
           // TODO compiler
           // CLANG_ANALYZER_NONNULL = YES;
