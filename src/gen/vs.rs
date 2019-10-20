@@ -360,23 +360,13 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
                     "      <RuntimeTypeInfo>false</RuntimeTypeInfo>\r\n",
                     // TODO disable exceptions
                     "      <CompileAsManaged>false</CompileAsManaged>\r\n",
-                    "      <DisableSpecificWarnings>{warnings}</DisableSpecificWarnings>\r\n",
-                    "      <AdditionalIncludeDirectories>"),
+                    "      <DisableSpecificWarnings>{warnings}</DisableSpecificWarnings>\r\n"),
          warnings = disable_warnings)?;
 
   let prefix = ctx.input_rel.to_str().unwrap();
   let target = proj.target.unwrap();
-  for &extend_index in &ctx.extends[index] {
-    write_includes(&mut f, prefix, ctx.get_target(extend_index))?;
-  }
-  write_includes(&mut f, prefix, target)?;
 
-  for inc in &*target.settings.include_dirs {
-    write!(f, "{}\\{};", prefix, inc)?;
-  }
-
-  write!(f, concat!("%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>\r\n",
-                    "      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>\r\n",
+  write!(f, concat!("      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>\r\n",
                     "      <AdditionalOptions>/experimental:preprocessor %(AdditionalOptions)</AdditionalOptions>\r\n",
                     "    </ClCompile>\r\n",
                     "    <Link>\r\n",
@@ -387,6 +377,8 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
 
   // TODO hardcoded
   for prof in &ctx.profiles {
+    let prof_lc = prof.to_lowercase();
+
     write!(f, concat!("  <ItemDefinitionGroup Condition=\"'$(Configuration)'=='{profile}'\">\r\n",
                       "    <ClCompile>\r\n",
                       "      <Optimization>{optimization}</Optimization>\r\n"),
@@ -401,7 +393,15 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
                           "      <IntrinsicFunctions>true</IntrinsicFunctions>\r\n").as_bytes())?;
     }
 
-    f.write_all(b"      <PreprocessorDefinitions>")?;
+    write!(f, "      <AdditionalIncludeDirectories>{}\\3rdparty\\include\\{};", prefix, prof_lc)?;
+
+    for &extend_index in &ctx.extends[index] {
+      write_includes(&mut f, prefix, ctx.get_target(extend_index))?;
+    }
+    write_includes(&mut f, prefix, target)?;
+
+    f.write_all(concat!("%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>\r\n",
+                        "      <PreprocessorDefinitions>").as_bytes())?;
 
     if *prof == "Debug" {
       f.write_all(b"_ITERATOR_DEBUG_LEVEL=1;")?;
@@ -418,8 +418,21 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
 
     // TODO hardcoded
     f.write_all(b"OpenGL32.lib;")?;
+    for &extend_index in &ctx.extends[index] {
+      for lib in &*ctx.get_target(extend_index).settings.libs {
+        write!(f, "{}.lib;", lib)?;
+      }
+    }
+    for lib in &*target.settings.libs {
+      write!(f, "{}.lib;", lib)?;
+    }
 
     f.write_all(concat!("%(AdditionalDependencies)</AdditionalDependencies>\r\n",
+                        "      <AdditionalLibraryDirectories>").as_bytes())?;
+
+    write!(f, "{}\\3rdparty\\lib\\windows\\x64\\{}", prefix, prof_lc)?;
+
+    f.write_all(concat!("</AdditionalLibraryDirectories>\r\n",
                         "    </Link>\r\n",
                         "  </ItemDefinitionGroup>\r\n").as_bytes())?;
   }
