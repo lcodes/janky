@@ -225,8 +225,11 @@ fn write_filter_dirs<'a, W>(f:     &mut W,
                             set:   &mut HashSet<&'a Path>,
                             files: &'a TargetFiles) -> IO where W: Write
 {
-  for dir in files.iter().filter(|x| x.meta.is_dir()) {
-    write_filter_dir(f, set, &dir.path)?;
+  for file in files {
+    write_filter_dir(f, set, match file.meta.is_dir() {
+      true  => &file.path,
+      false => file.path.parent().unwrap()
+    })?;
   }
   Ok(())
 }
@@ -235,19 +238,22 @@ fn write_filter_dir<'a, W>(f:    &mut W,
                            set:  &mut HashSet<&'a Path>,
                            path: &'a Path) -> IO where W: Write
 {
-  if let Some(p) = path.parent() {
-    // FIXME: better way to test empty path than getting a string slice?
-    if !p.to_str().unwrap().is_empty() && !set.contains(p) {
-      set.insert(p);
-      write_filter_dir(f, set, p)?;
-    }
-  }
+  if !set.contains(path) {
+    set.insert(path);
 
-  write!(f, concat!("    <Filter Include=\"{dir}\">\r\n",
-                    "      <UniqueIdentifier>{{{uuid}}}</UniqueIdentifier>\r\n",
-                    "    </Filter>\r\n"),
-         dir  = path.to_str().unwrap(),
-         uuid = random_uuid())?;
+    if let Some(p) = path.parent() {
+      // FIXME: better way to test empty path than getting a string slice?
+      if !p.to_str().unwrap().is_empty() {
+        write_filter_dir(f, set, p)?;
+      }
+    }
+
+    write!(f, concat!("    <Filter Include=\"{dir}\">\r\n",
+                      "      <UniqueIdentifier>{{{uuid}}}</UniqueIdentifier>\r\n",
+                      "    </Filter>\r\n"),
+           dir  = path.to_str().unwrap(),
+           uuid = random_uuid())?;
+  }
 
   Ok(())
 }
