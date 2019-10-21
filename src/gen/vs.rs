@@ -430,6 +430,9 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
                       "/external:W0 /external:I {}\\3rdparty\\include\\{}"),
            prefix, prof_lc)?;
 
+    // https://devblogs.microsoft.com/cppblog/msvc-preprocessor-progress-towards-conformance/
+    // https://devblogs.microsoft.com/cppblog/broken-warnings-theory/
+
     for &extend_index in &ctx.extends[index] {
       write_external_includes(&mut f, prefix, ctx.get_target(extend_index))?;
     }
