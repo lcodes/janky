@@ -128,7 +128,6 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
                         // " -s PTHREAD_POOL_SIZE=4",
                         " -s USE_WEBGL2=1",
                         " -s EXIT_RUNTIME=1",
-                        " -s ASSERTIONS=2",
                         " -s DISABLE_DEPRECATED_FIND_EVENT_TARGET_BEHAVIOR=1",
                         " --emrun",
                         " --preload-file ../../demo");
@@ -156,12 +155,17 @@ fn write_lists_txt(ctx: &Context, build: &Build) -> IO {
     _                   => "-g"
   };
 
+  let extra_debug_ldflags = match build.platform {
+    PlatformType::HTML5 => " -s ASSERTIONS=2 -s DEMANGLE_SUPPORT=1",
+    _                   => ""
+  };
+
   // TODO hardcoded flags
   // TODO -Wpedantic is annoying with GCC
   let cflags          = "-Wall -Wextra -fno-exceptions -fno-rtti";
   let debug_cflags    = format!("-I{}/3rdparty/include/debug -D_DEBUG=1 {}", prefix, g);
   let release_cflags  = format!("-I{}/3rdparty/include/release -Werror", prefix);
-  let debug_ldflags   = format!("-L{}/3rdparty/lib/{}/{}/debug", prefix, platform_lc, arch_lc);
+  let debug_ldflags   = format!("-L{}/3rdparty/lib/{}/{}/debug{}", prefix, platform_lc, arch_lc, extra_debug_ldflags);
   let release_ldflags = format!("-L{}/3rdparty/lib/{}/{}/release", prefix, platform_lc, arch_lc);
   write!(f, concat!("set(CMAKE_CXX_FLAGS \"{cflags}\")\n",
                     "set(CMAKE_CXX_FLAGS_DEBUG \"{debug_cflags}\")\n",
