@@ -50,6 +50,9 @@ impl Generator for VisualStudio {
 
 type IO = IOResult<()>;
 
+const DISABLE_WARNINGS: &str =
+  "4324;4514;4571;4623;4625;4626;4710;4711;4820;5026;5027;5045;6031;6387;26444;26812";
+
 const ARCHITECTURES: &[Architecture] = &[ // TODO derive from project
   // Architecture::ARM, // TODO only when using the android toolchain
   // Architecture::ARM64,
@@ -283,6 +286,7 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
   let mut f = proj.create(&ctx.build_dir, proj.ext())?;
 
   f.write_all(b"  <ItemGroup Label=\"ProjectConfigurations\">\r\n")?;
+
   for arch in ARCHITECTURES {
     for prof in &ctx.profiles {
       write!(f, concat!("    <ProjectConfiguration Include=\"{profile}|{platform}\">\r\n",
@@ -293,16 +297,20 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
              platform = get_arch_platform(*arch))?;
     }
   }
-  f.write_all(b"  </ItemGroup>\r\n")?;
 
-  f.write_all(b"  <PropertyGroup Label=\"Globals\">\r\n")?;
+  f.write_all(concat!("  </ItemGroup>\r\n",
+                      "  <PropertyGroup Label=\"Globals\">\r\n",
+                      "    <VCProjectVersion>16.0</VCProjectVersion>\r\n").as_bytes())?;
+
   write!(f, "    <ProjectGuid>{{{}}}</ProjectGuid>\r\n", proj.uuid)?;
   //f.write_fmt(format_args!("    <Keyword>{}</Keyword>\r\n", "Android"))?;
   write!(f, concat!("    <RootNamespace>{project_name}</RootNamespace>\r\n",
                     "    <OutDir>$(Platform)\\$(Configuration)\\{project_name}\\</OutDir>\r\n",
                     "    <IntDir>$(Platform)\\$(Configuration)\\{project_name}\\</IntDir>\r\n"),
          project_name = proj.name)?;
-  f.write_all(b"  </PropertyGroup>\r\n")?;
+
+  f.write_all(concat!("    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>\r\n",
+                      "  </PropertyGroup>\r\n").as_bytes())?;
 
   write_proj_import(&mut f, match proj.kind {
     ProjKind::Android => r#"$(AndroidTargetsPath)\Android.Default.props"#,
@@ -328,7 +336,7 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
            debug   = *prof != "Release")?;
 
     if *prof == "Release" {
-      f.write_all(b"  <WholeProgramOptimization>true</WholeProgramOptimization>\r\n")?;
+      f.write_all(b"    <WholeProgramOptimization>true</WholeProgramOptimization>\r\n")?;
     }
 
     f.write_all(b"  </PropertyGroup>\r\n")?;
@@ -343,7 +351,8 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
   f.write_all(b"  <ImportGroup Label=\"Shared\">\r\n  </ImportGroup>\r\n")?;
 
   write!(f, concat!("  <ImportGroup Label=\"PropertySheets\">\r\n",
-                    "    <Import Project=\"{path}\" Condition=\"exists('{path}')\" />\r\n",
+                    "    <Import Project=\"{path}\" Condition=\"exists('{path}')\" ",
+                    "Label=\"LocalAppDataPlatform\" />\r\n",
                     "  </ImportGroup>\r\n"),
          path = "$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props")?;
 
@@ -355,7 +364,6 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
 
   // TODO general properties for profiles/architectures
 
-  let disable_warnings = "4324;4514;4571;4623;4625;4626;4710;4820;5026;5027;5045;6031;6387;26444";
   write!(f, concat!("  <ItemDefinitionGroup>\r\n",
                     "    <ClCompile>\r\n",
                     "      <WarningLevel>EnableAllWarnings</WarningLevel>\r\n",
@@ -367,13 +375,12 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
                     // TODO disable exceptions
                     "      <CompileAsManaged>false</CompileAsManaged>\r\n",
                     "      <DisableSpecificWarnings>{warnings}</DisableSpecificWarnings>\r\n"),
-         warnings = disable_warnings)?;
+         warnings = DISABLE_WARNINGS)?;
 
   let prefix = ctx.input_rel.to_str().unwrap();
   let target = proj.target.unwrap();
 
   write!(f, concat!("      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>\r\n",
-                    "      <AdditionalOptions>/experimental:preprocessor %(AdditionalOptions)</AdditionalOptions>\r\n",
                     "    </ClCompile>\r\n",
                     "    <Link>\r\n",
                     "      <SubSystem>{subsystem}</SubSystem>\r\n",
@@ -396,10 +403,11 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
 
     if *prof == "Release" {
       f.write_all(concat!("      <FunctionLevelLinking>true</FunctionLevelLinking>\r\n",
-                          "      <IntrinsicFunctions>true</IntrinsicFunctions>\r\n").as_bytes())?;
+                          "      <IntrinsicFunctions>true</IntrinsicFunctions>\r\n",
+                          "      <FloatingPointModel>fast</FloatingPointModel>\r\n").as_bytes())?;
     }
 
-    write!(f, "      <AdditionalIncludeDirectories>{}\\3rdparty\\include\\{};", prefix, prof_lc)?;
+    f.write_all(b"      <AdditionalIncludeDirectories>")?;
 
     for &extend_index in &ctx.extends[index] {
       write_includes(&mut f, prefix, ctx.get_target(extend_index))?;
@@ -417,13 +425,27 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
     }
     write_defines(&mut f, target)?;
 
-    f.write_all(concat!("%(PreprocessorDefinitions)</PreprocessorDefinitions>\r\n",
+    write!(f, concat!("%(PreprocessorDefinitions)</PreprocessorDefinitions>\r\n",
+                      "      <AdditionalOptions>/experimental:preprocessor /experimental:external ",
+                      "/external:W0 /external:I {}\\3rdparty\\include\\{}"),
+           prefix, prof_lc)?;
+
+    for &extend_index in &ctx.extends[index] {
+      write_external_includes(&mut f, prefix, ctx.get_target(extend_index))?;
+    }
+    write_external_includes(&mut f, prefix, target)?;
+
+    f.write_all(concat!("%(AdditionalOptions)</AdditionalOptions>\r\n",
                         "    </ClCompile>\r\n",
-                        "    <Link>\r\n",
-                        "      <AdditionalDependencies>").as_bytes())?;
+                        "    <Link>\r\n").as_bytes())?;
+
+    if *prof == "Release" {
+      f.write_all(concat!("      <EnableCOMDATFolding>true</EnableCOMDATFolding>\r\n",
+                          "      <OptimizeReferences>true</OptimizeReferences>\r\n").as_bytes())?;
+    }
 
     // TODO hardcoded
-    f.write_all(b"OpenGL32.lib;")?;
+    f.write_all(b"      <AdditionalDependencies>OpenGL32.lib;")?;
     for &extend_index in &ctx.extends[index] {
       for lib in &*ctx.get_target(extend_index).settings.libs {
         write!(f, "{}.lib;", lib)?;
@@ -481,9 +503,20 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
   Ok(())
 }
 
+fn write_external_includes<W>(f: &mut W, prefix: &str, target: &Target) -> IO where W: Write {
+  for &inc in &*target.settings.include_dirs {
+    if inc.starts_with("external/") {
+      write!(f, " /external:I {}\\{}", prefix, inc.replace("/", "\\"))?;
+    }
+  }
+  Ok(())
+}
+
 fn write_includes<W>(f: &mut W, prefix: &str, target: &Target) -> IO where W: Write {
-  for inc in &*target.settings.include_dirs {
-    write!(f, "{}\\{};", prefix, inc.replace("/", "\\"))?;
+  for &inc in &*target.settings.include_dirs {
+    if !inc.starts_with("external/") {
+      write!(f, "{}\\{};", prefix, inc.replace("/", "\\"))?;
+    }
   }
   Ok(())
 }
@@ -499,8 +532,18 @@ fn write_files<W>(f: &mut W, ctx: &Context, index: usize,
                   prefix: &str, target: &Target) -> IO where W: Write
 {
   for file in ctx.sources[index].iter().filter(|x| x.meta.is_file()) {
-    write!(f, "    <{} Include=\"{}\\{}\" />\r\n",
-           get_item_group_element(target, file), prefix, file.to_str())?;
+    let element  = get_item_group_element(target, file);
+    let filename = file.to_str();
+    if filename.starts_with("external\\") && !file.is_header() {
+      write!(f, concat!("    <{0} Include=\"{1}\\{2}\">\r\n",
+                        "      <PrecompiledHeader>NotUsing</PrecompiledHeader>\r\n",
+                        "      <WarningLevel>TurnOffAllWarnings</WarningLevel>\r\n",
+                        "    </{0}>\r\n"),
+             element, prefix, filename)?;
+    }
+    else {
+      write!(f, "    <{} Include=\"{}\\{}\" />\r\n", element, prefix, filename)?;
+    }
   }
 
   Ok(())
