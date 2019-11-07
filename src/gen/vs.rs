@@ -5,7 +5,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::ctx::{Architecture, Context, Generator, FileInfo,
-                 PlatformType, RunResult, Target, TargetFiles};
+                 PlatformType, RunResult, Target, TargetFiles, TargetType};
 
 pub struct VisualStudio;
 
@@ -38,8 +38,8 @@ impl Generator for VisualStudio {
     }}));
 
     for (i, proj) in projs.iter().skip(1).enumerate() {
-      write_proj   (ctx, i, proj, &tools)?;
-      write_filters(ctx, i, proj)?;
+      write_proj     (ctx, i, proj, &tools)?;
+      write_filters  (ctx, i, proj)?;
     }
 
     write_items(ctx, &projs[0])?;
@@ -189,11 +189,101 @@ fn random_uuid() -> String {
 }
 
 
+// Resources
+// -----------------------------------------------------------------------------
+
+fn write_resources(ctx: &Context, index: usize, proj: &Proj) -> IO {
+  let target = proj.target.unwrap();
+  if target.target_type != TargetType::Application {
+    return Ok(());
+  }
+
+  let path = ctx.build_dir.join([proj.name, "_Windows"].join(""));
+  std::fs::create_dir_all(&path)?;
+
+  write_manifest_xml(&path, ctx)?;
+  write_resource_rc(&path)?;
+
+  let pattern = [target.assets.unwrap(), "\\windows\\"].join("");
+  let assets  = ctx.assets[index].iter()
+    .filter(|info| info.meta.is_file() && info.to_str().starts_with(&pattern));
+
+  for asset in assets {
+    std::fs::copy(ctx.input_dir.join(&asset.path), path.join(asset.name()))?;
+  }
+
+  Ok(())
+}
+
+fn write_manifest_xml(path: &Path, ctx: &Context) -> IO {
+  let mut f = File::create(path.join("Manifest.xml"))?;
+
+  write!(f, concat!(
+    "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\r\n",
+    "<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\r\n",
+    "  <assemblyIdentity type=\"win32\"\r\n",
+    "                    name=\"{}\"\r\n",
+    "                    version=\"{}.0\"\r\n",
+    "                    processorArchitecture=\"*\"/>\r\n",
+    "  <description>{}</description>\r\n",
+    "  <trustInfo xmlns=\"urn:schemas-microsoft-com:asm.v3\">\r\n",
+    "    <security>\r\n",
+    "      <requestedPrivileges>\r\n",
+    "        <requestedExecutionLevel level=\"asInvoker\" uiAccess=\"false\"/>\r\n",
+    "      </requestedPrivileges>\r\n",
+    "    </security>\r\n",
+    "  </trustInfo>\r\n",
+    "  <compatibility xmlns=\"urn:schemas-microsoft-com:compatibility.v1\">\r\n",
+    "    <application>\r\n",
+    "      <supportedOS Id=\"{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}\"/>\r\n", // 10
+    "      <supportedOS Id=\"{{1f676c76-80e1-4239-95bb-83d0f6d0da78}}\"/>\r\n", // 8.1
+    "      <supportedOS Id=\"{{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}}\"/>\r\n", // 8
+    "      <supportedOS Id=\"{{35138b9a-5d96-4fbd-8e2d-a2440225f93a}}\"/>\r\n", // 7
+    "      <supportedOS Id=\"{{e2011457-1546-43c5-a5fe-008deee3d3f0}}\"/>\r\n", // Vista
+    "    </application>\r\n",
+    "  </compatibility>\r\n",
+    "  <dependency>\r\n",
+    "    <dependentAssembly>\r\n",
+    "      <assemblyIdentity type=\"win32\"\r\n",
+    "                        name=\"Microsoft.Windows.Common-Controls\"\r\n",
+    "                        version=\"6.0.0.0\"\r\n",
+    "                        processorArchitecture=\"*\"\r\n",
+    "                        publicKeyToken=\"6595b64144ccf1df\"\r\n",
+    "                        language=\"*\"/>\r\n",
+    "    </dependentAssembly>\r\n",
+    "  </dependency>\r\n",
+    "</assembly>\r\n"
+  ), ctx.project.name, ctx.project.version, ctx.project.description)?;
+
+  Ok(())
+}
+
+fn write_resource_rc(path: &Path) -> IO {
+  let mut f = File::create(path.join("Resource.rc"))?;
+
+  // TODO VERSIONINFO
+  write!(f, concat!(
+    "#define APP_VERSION  1\r\n",
+    "#define APP_MANIFEST 1\r\n",
+    "#define APP_ICON     2\r\n",
+    "\r\n",
+    "#define RT_MANIFEST 24\r\n",
+    "\r\n",
+    "APP_MANIFEST RT_MANIFEST Manifest.xml\r\n",
+    "\r\n",
+    "APP_ICON ICON Icon.ico\r\n"
+  ))?;
+
+  Ok(())
+}
+
+
 // Filter File
 // -----------------------------------------------------------------------------
 
 fn write_filters(ctx: &Context, index: usize, proj: &Proj) -> IO {
   assert!(proj.kind == ProjKind::CXX);
+  let target = proj.target.unwrap();
 
   let mut f = proj.create(&ctx.build_dir, "vcxproj.filters")?;
   f.write_all(b"  <ItemGroup>\r\n")?;
@@ -207,6 +297,11 @@ fn write_filters(ctx: &Context, index: usize, proj: &Proj) -> IO {
     write_filter_dirs(&mut f, &mut dir_set, files)?;
   }
 
+  let asset_filter = "resources";
+  if target.target_type == TargetType::Application {
+    write_filter_element(&mut f, asset_filter)?;
+  }
+
   f.write_all(concat!("  </ItemGroup>\r\n",
                       "  <ItemGroup>\r\n").as_bytes())?;
 
@@ -215,7 +310,14 @@ fn write_filters(ctx: &Context, index: usize, proj: &Proj) -> IO {
     write_filter_files(&mut f, prefix, &ctx.sources[extend_index],
                        ctx.get_target(extend_index))?;
   }
-  write_filter_files(&mut f, prefix, files, proj.target.unwrap())?;
+  write_filter_files(&mut f, prefix, files, target)?;
+
+  if target.target_type == TargetType::Application {
+    let prefix = [proj.name, "_Windows"].join("");
+    write_filter_file(&mut f, "Xml",             &prefix, "Manifest.xml", asset_filter)?;
+    write_filter_file(&mut f, "Image",           &prefix, "Icon.ico",     asset_filter)?;
+    write_filter_file(&mut f, "ResourceCompile", &prefix, "Resource.rc",  asset_filter)?;
+  }
 
   f.write_all(concat!("  </ItemGroup>\r\n",
                       "</Project>\r\n").as_bytes())?;
@@ -251,14 +353,18 @@ fn write_filter_dir<'a, W>(f:    &mut W,
       }
     }
 
-    write!(f, concat!("    <Filter Include=\"{dir}\">\r\n",
-                      "      <UniqueIdentifier>{{{uuid}}}</UniqueIdentifier>\r\n",
-                      "    </Filter>\r\n"),
-           dir  = path.to_str().unwrap(),
-           uuid = random_uuid())?;
+    write_filter_element(f, path.to_str().unwrap())?;
   }
 
   Ok(())
+}
+
+fn write_filter_element<W>(f: &mut W, path: &str) -> IO where W: Write {
+  write!(f, concat!("    <Filter Include=\"{dir}\">\r\n",
+                    "      <UniqueIdentifier>{{{uuid}}}</UniqueIdentifier>\r\n",
+                    "    </Filter>\r\n"),
+         dir  = path,
+         uuid = random_uuid())
 }
 
 fn write_filter_files<W>(f: &mut W, prefix: &str, files: &TargetFiles,
@@ -266,16 +372,21 @@ fn write_filter_files<W>(f: &mut W, prefix: &str, files: &TargetFiles,
 {
   for file in files.iter().filter(|x| x.meta.is_file()) {
     if let Some(filter) = file.path.parent() {
-      write!(f, concat!("    <{element} Include=\"{prefix}\\{include}\">\r\n",
-                        "      <Filter>{filter}</Filter>\r\n",
-                        "    </{element}>\r\n"),
-             element = get_item_group_element(target, file),
-             prefix  = prefix,
-             include = file.to_str(),
-             filter  = filter.to_str().unwrap())?;
+      write_filter_file(f, get_item_group_element(target, file),
+                           prefix, file.to_str(), filter.to_str().unwrap())?;
     }
   }
   Ok(())
+}
+
+fn write_filter_file<W>(f: &mut W, element: &str, prefix: &str, file: &str, filter: &str) -> IO where W: Write {
+  write!(f, concat!("    <{element} Include=\"{prefix}\\{file}\">\r\n",
+                    "      <Filter>{filter}</Filter>\r\n",
+                    "    </{element}>\r\n"),
+         element = element,
+         prefix  = prefix,
+         file    = file,
+         filter  = filter)
 }
 
 
@@ -485,6 +596,17 @@ fn write_proj(ctx: &Context, index: usize, proj: &Proj, tools: &Tools) -> IO {
     ProjKind::Items => unreachable!()
   }
   f.write_all(b"  </ItemGroup>\r\n")?;
+
+  if target.target_type == TargetType::Application {
+    write_resources(ctx, index, proj)?;
+
+    write!(f, concat!("  <ItemGroup>\r\n",
+                      "    <Xml Include=\"{0}_Windows\\Manifest.xml\" />\r\n",
+                      "    <Image Include=\"{0}_Windows\\Icon.ico\" />\r\n",
+                      "    <ResourceCompile Include=\"{0}_Windows\\Resource.rc\" />\r\n",
+                      "  </ItemGroup>\r\n"),
+           proj.name)?;
+  }
 
   // TODO resources
   // - resources.rc
